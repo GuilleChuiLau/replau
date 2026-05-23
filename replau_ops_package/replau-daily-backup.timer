@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Replau LocalAPI backup daily
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+Unit=replau-daily-backup.service
+
+[Install]
+WantedBy=timers.target

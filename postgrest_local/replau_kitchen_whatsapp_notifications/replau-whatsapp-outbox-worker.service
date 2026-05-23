@@ -1,0 +1,18 @@
+[Unit]
+Description=Replau WhatsApp Outbox Worker
+After=network.target postgrest.service
+Wants=postgrest.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/replau_whatsapp_outbox_worker
+EnvironmentFile=/etc/replau-whatsapp-outbox-worker.env
+ExecStart=/opt/replau_whatsapp_outbox_worker/.venv/bin/python /opt/replau_whatsapp_outbox_worker/whatsapp_outbox_worker.py
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

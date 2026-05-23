@@ -1,0 +1,7 @@
+[Unit]
+Description=Replau LocalAPI Daily PostgreSQL Backup
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/replau-ops.env
+ExecStart=/opt/replau_ops/replau_backup.sh

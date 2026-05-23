@@ -1,0 +1,25 @@
+[Unit]
+Description=Replau OpenClaw WhatsApp Bridge
+After=network.target
+
+[Service]
+Type=simple
+User=guill
+Group=guill
+WorkingDirectory=/opt/replau_openclaw_whatsapp_bridge
+EnvironmentFile=/etc/replau-openclaw-whatsapp-bridge.env
+ExecStart=/opt/replau_openclaw_whatsapp_bridge/.venv/bin/python /opt/replau_openclaw_whatsapp_bridge/bridge.py
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

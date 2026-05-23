@@ -1,0 +1,19 @@
+[Unit]
+Description=Replau Product Admin UI
+After=network.target
+
+[Service]
+Type=simple
+User=guill
+Group=guill
+WorkingDirectory=/opt/replau_product_admin
+EnvironmentFile=/etc/replau-product-admin.env
+ExecStart=/opt/replau_product_admin/.venv/bin/python /opt/replau_product_admin/replau_product_admin.py
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

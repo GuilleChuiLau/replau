@@ -1,0 +1,16 @@
+{
+  "p_customer_name": "Juan Perez",
+  "p_items": [
+    {
+      "producto_texto": "PIMIENTA MOLIDA",
+      "cantidad": 2,
+      "unidad": "BOLSA"
+    },
+    {
+      "producto_texto": "CANELA MOLIDA",
+      "cantidad": 1,
+      "unidad": "POTE"
+    }
+  ],
+  "p_delivery": 0
+}

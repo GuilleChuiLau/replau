@@ -1,0 +1,17 @@
+[Unit]
+Description=Replau OpenClaw WhatsApp Send Adapter
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/replau_openclaw_whatsapp_send_adapter
+EnvironmentFile=/etc/replau-openclaw-whatsapp-send-adapter.env
+ExecStart=/opt/replau_openclaw_whatsapp_send_adapter/.venv/bin/python /opt/replau_openclaw_whatsapp_send_adapter/openclaw_whatsapp_send_adapter.py
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

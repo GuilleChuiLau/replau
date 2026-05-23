@@ -1,0 +1,18 @@
+[Unit]
+Description=Replau Secure Logistics Order Viewer
+After=network.target postgrest.service
+Wants=postgrest.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/replau_logistics_viewer
+EnvironmentFile=/etc/replau-logistics-viewer.env
+ExecStart=/opt/replau_logistics_viewer/.venv/bin/python /opt/replau_logistics_viewer/logistics_viewer.py
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

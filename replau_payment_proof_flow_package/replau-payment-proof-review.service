@@ -1,0 +1,19 @@
+[Unit]
+Description=Replau Payment Proof Review UI
+After=network.target
+
+[Service]
+Type=simple
+User=guill
+Group=guill
+WorkingDirectory=/opt/replau_payment_proof_review
+EnvironmentFile=/etc/replau-payment-proof-review.env
+ExecStart=/opt/replau_payment_proof_review/.venv/bin/python /opt/replau_payment_proof_review/replau_payment_proof_review.py
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

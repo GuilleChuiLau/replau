@@ -1,0 +1,17 @@
+[Unit]
+Description=Replau Kitchen UI
+After=network.target postgrest.service
+Wants=postgrest.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/replau_kitchen_ui
+EnvironmentFile=/etc/replau-kitchen-ui.env
+ExecStart=/opt/replau_kitchen_ui/.venv/bin/python /opt/replau_kitchen_ui/kitchen_ui.py
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

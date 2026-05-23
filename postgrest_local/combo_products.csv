@@ -1,0 +1,3 @@
+cdg_prod,nombre,tipo_producto,unidad_medida,pack_default,envase_default,stock_minimo,controla_lote,controla_vencimiento,active,pack_name,pack_factor,pack_is_default,precio_unidad,precio,moneda
+COMBO_CLASSIC,COMBO CLASSIC,TERMINADO,UNIDAD,UNIDAD,,0,false,false,true,UNIDAD,1,true,UNIDAD,24.00,PEN
+COMBO_DOUBLE_CHEESE,COMBO DOBLE QUESO,TERMINADO,UNIDAD,UNIDAD,,0,false,false,true,UNIDAD,1,true,UNIDAD,46.00,PEN

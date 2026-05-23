@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Replau stuck monitor every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=replau-stuck-monitor.service
+
+[Install]
+WantedBy=timers.target

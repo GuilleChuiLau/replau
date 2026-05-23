@@ -1,0 +1,35 @@
+# Python/runtime artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# Local secrets and runtime state
+.env
+.env.*
+!.env.example
+!.env*.example
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.bak
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Preserved legacy nested git metadata
+.git-legacy-*/
+postgrest_local/.git-legacy-*/

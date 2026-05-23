@@ -1,0 +1,9 @@
+[Unit]
+Description=Replau WhatsApp Gateway Watchdog
+After=network-online.target openclaw-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/replau_ops
+ExecStart=/opt/replau_ops/.venv/bin/python /opt/replau_ops/replau_whatsapp_watchdog.py

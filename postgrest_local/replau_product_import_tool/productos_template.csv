@@ -1,0 +1,4 @@
+cdg_prod,nombre,tipo_producto,unidad_medida,pack_default,envase_default,stock_minimo,controla_lote,controla_vencimiento,active,pack_name,pack_factor,pack_is_default,precio_unidad,precio,moneda,valid_from,valid_to
+MP00100009,OREJONES EXTRA,GRANELES,KG,SACO,,10,true,true,true,SACO,1,true,SACO,15.50,PEN,2026-04-23,
+COND003,COMINO MOLIDO,CONDIMENTOS,KG,BOLSA,BOLSA,5,true,true,true,BOLSA,1,true,BOLSA,8.50,PEN,2026-04-23,
+COND004,OREGANO MOLIDO,CONDIMENTOS,KG,POTE,POTE,5,true,true,true,POTE,1,true,POTE,11.00,PEN,2026-04-23,

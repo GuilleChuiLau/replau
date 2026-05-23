@@ -1,0 +1,19 @@
+[Unit]
+Description=Replau Ops Health Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=guill
+Group=guill
+WorkingDirectory=/opt/replau_ops
+EnvironmentFile=/etc/replau-ops.env
+ExecStart=/opt/replau_ops/.venv/bin/python /opt/replau_ops/replau_health_dashboard.py
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
