@@ -284,14 +284,13 @@ def render_layout(title: str, body: str, auto_refresh_seconds: int | None = None
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {refresh}
   <style>
-    @import url("https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800;900&display=swap");
     :root {{
       --bg:#f4f5f7; --bg-2:#e5e7eb; --card:#ffffff; --text:#17202a; --muted:#697386; --line:#d1d5db;
       --blue:#2563eb; --green:#24945a; --orange:#f7b32b; --red:#dc3f35; --purple:#7c3aed; --brand:#e4572e;
       --radius:22px; --shadow:0 18px 48px rgba(17,24,39,.12);
     }}
     * {{ box-sizing: border-box; }}
-    body {{ margin:0; font-family:"Montserrat", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:radial-gradient(circle at top left, rgba(228,87,46,.08), transparent 28%), linear-gradient(180deg,var(--bg),var(--bg-2)); color:var(--text); }}
+    body {{ margin:0; font-family:"Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:radial-gradient(circle at top left, rgba(228,87,46,.08), transparent 28%), linear-gradient(180deg,var(--bg),var(--bg-2)); color:var(--text); }}
     a {{ color: var(--brand); text-decoration: none; font-weight:700; }}
     .page {{ max-width: 1400px; margin: 0 auto; padding: 28px; }}
     .topbar {{ display:flex; justify-content:space-between; gap:18px; align-items:flex-start; flex-wrap:wrap; margin-bottom:24px; padding:20px 22px; background:rgba(255,255,255,.82); border:1px solid rgba(209,213,219,.92); border-radius:var(--radius); box-shadow:var(--shadow); backdrop-filter:blur(10px); }}

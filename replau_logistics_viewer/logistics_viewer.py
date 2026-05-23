@@ -724,14 +724,13 @@ def render_layout(title: str, body: str, auto_refresh_seconds: int | None = None
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {refresh}
   <style>
-    @import url("https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800;900&display=swap");
     :root {{
       --bg:#0f172a; --bg-2:#020617; --card:#111827; --card-2:#0b1220; --text:#e5e7eb; --muted:#94a3b8; --line:#334155;
       --blue:#3b82f6; --green:#22c55e; --orange:#8b5cf6; --red:#22c55e; --purple:#8b5cf6; --brand:#8b5cf6;
       --radius:22px; --shadow:0 18px 48px rgba(0,0,0,.35);
     }}
     * {{ box-sizing: border-box; }}
-    body {{ margin:0; font-family:"Montserrat", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:radial-gradient(circle at top left, rgba(249,115,22,.16), transparent 30%), radial-gradient(circle at top right, rgba(59,130,246,.10), transparent 28%), linear-gradient(180deg,var(--bg),var(--bg-2)); color:var(--text); }}
+    body {{ margin:0; font-family:"Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:radial-gradient(circle at top left, rgba(249,115,22,.16), transparent 30%), radial-gradient(circle at top right, rgba(59,130,246,.10), transparent 28%), linear-gradient(180deg,var(--bg),var(--bg-2)); color:var(--text); }}
     a {{ color:#93c5fd; text-decoration: none; font-weight:700; }}
     .erp-shell {{ max-width:1400px; margin:0 auto; padding:18px 28px 0; }}
     .erp-nav {{ display:flex; flex-wrap:wrap; gap:8px; padding:12px; border:1px solid rgba(51,65,85,.95); border-radius:16px; background:rgba(11,18,32,.92); box-shadow:0 10px 28px rgba(0,0,0,.22); }}

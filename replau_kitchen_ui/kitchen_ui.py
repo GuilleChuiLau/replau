@@ -232,14 +232,13 @@ def dashboard(request: Request) -> HTMLResponse:
   <meta http-equiv="refresh" content="{AUTO_REFRESH_SECONDS}">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    @import url("https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800;900&display=swap");
     :root {{
       --bg:#0f172a; --bg-2:#020617; --card:#111827; --card-2:#0b1220; --text:#e5e7eb; --muted:#94a3b8; --line:#334155;
       --blue:#3b82f6; --green:#00e676; --orange:#ffd400; --red:#ff1744; --purple:#8b5cf6; --brand:#8b5cf6;
       --shadow:0 18px 48px rgba(0,0,0,.35); --radius:24px;
     }}
     * {{ box-sizing:border-box; }}
-    body {{ margin:0; font-family:"Montserrat", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:radial-gradient(circle at top left, rgba(249,115,22,.16), transparent 30%), radial-gradient(circle at top right, rgba(59,130,246,.10), transparent 28%), linear-gradient(180deg,var(--bg),var(--bg-2)); color:var(--text); min-height:100vh; }}
+    body {{ margin:0; font-family:"Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:radial-gradient(circle at top left, rgba(249,115,22,.16), transparent 30%), radial-gradient(circle at top right, rgba(59,130,246,.10), transparent 28%), linear-gradient(180deg,var(--bg),var(--bg-2)); color:var(--text); min-height:100vh; }}
     a {{ color:#93c5fd; }}
     .wrap {{ max-width:1440px; margin:0 auto; padding:28px; }}
     .erp-nav {{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:18px; padding:12px; border:1px solid rgba(51,65,85,.95); border-radius:16px; background:rgba(11,18,32,.92); box-shadow:0 10px 28px rgba(0,0,0,.22); }}
@@ -356,10 +355,9 @@ def order_detail(pedido_id: int, request: Request) -> HTMLResponse:
   <meta http-equiv="refresh" content="{AUTO_REFRESH_SECONDS}">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    @import url("https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800;900&display=swap");
     :root {{ --bg:#0f172a; --bg-2:#020617; --card:#111827; --card-2:#0b1220; --text:#e5e7eb; --muted:#94a3b8; --line:#334155; --blue:#3b82f6; --green:#00e676; --orange:#ffd400; --red:#ff1744; --purple:#8b5cf6; --brand:#8b5cf6; --radius:24px; --shadow:0 18px 48px rgba(0,0,0,.35); }}
     * {{ box-sizing:border-box; }}
-    body {{ margin:0; font-family:"Montserrat", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:radial-gradient(circle at top left, rgba(249,115,22,.16), transparent 30%), radial-gradient(circle at top right, rgba(59,130,246,.10), transparent 28%), linear-gradient(180deg,var(--bg),var(--bg-2)); color:var(--text); }}
+    body {{ margin:0; font-family:"Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:radial-gradient(circle at top left, rgba(249,115,22,.16), transparent 30%), radial-gradient(circle at top right, rgba(59,130,246,.10), transparent 28%), linear-gradient(180deg,var(--bg),var(--bg-2)); color:var(--text); }}
     .page {{ max-width:1120px; margin:0 auto; padding:28px; }}
     .erp-nav {{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:18px; padding:12px; border:1px solid rgba(51,65,85,.95); border-radius:16px; background:rgba(11,18,32,.92); box-shadow:0 10px 28px rgba(0,0,0,.22); }}
     .erp-nav a {{ color:#e5e7eb; background:#1f2937; border:1px solid #334155; border-radius:999px; padding:8px 11px; font-size:13px; font-weight:850; text-decoration:none; }}

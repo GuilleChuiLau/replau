@@ -143,14 +143,13 @@ def dashboard(request: Request) -> HTMLResponse:
   <meta http-equiv="refresh" content="{AUTO_REFRESH_SECONDS}">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    @import url("https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800;900&display=swap");
     :root {{
       --bg:#0f172a; --bg-2:#020617; --card:#111827; --card-2:#0b1220; --text:#e5e7eb; --muted:#94a3b8; --line:#334155;
       --blue:#3b82f6; --green:#00e676; --orange:#ffd400; --red:#ff1744; --purple:#8b5cf6; --brand:#8b5cf6;
       --shadow:0 18px 48px rgba(0,0,0,.35); --radius:24px;
     }}
     * {{ box-sizing:border-box; }}
-    body {{ margin:0; font-family:"Montserrat", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:radial-gradient(circle at top left, rgba(249,115,22,.16), transparent 30%), radial-gradient(circle at top right, rgba(59,130,246,.10), transparent 28%), linear-gradient(180deg,var(--bg),var(--bg-2)); color:var(--text); min-height:100vh; }}
+    body {{ margin:0; font-family:"Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:radial-gradient(circle at top left, rgba(249,115,22,.16), transparent 30%), radial-gradient(circle at top right, rgba(59,130,246,.10), transparent 28%), linear-gradient(180deg,var(--bg),var(--bg-2)); color:var(--text); min-height:100vh; }}
     a {{ color:#93c5fd; }}
     .wrap {{ max-width:1440px; margin:0 auto; padding:28px; }}
     .topbar {{ display:flex; justify-content:space-between; gap:18px; align-items:flex-start; flex-wrap:wrap; margin-bottom:24px; padding:20px 22px; background:rgba(17,24,39,.88); border:1px solid rgba(51,65,85,.95); border-radius:var(--radius); box-shadow:var(--shadow); backdrop-filter:blur(10px); }}
@@ -248,10 +247,9 @@ def order_detail(pedido_id: int, request: Request) -> HTMLResponse:
   <meta http-equiv="refresh" content="{AUTO_REFRESH_SECONDS}">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    @import url("https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800;900&display=swap");
     :root {{ --bg:#0f172a; --bg-2:#020617; --card:#111827; --card-2:#0b1220; --text:#e5e7eb; --muted:#94a3b8; --line:#334155; --blue:#3b82f6; --green:#00e676; --orange:#ffd400; --red:#ff1744; --purple:#8b5cf6; --brand:#8b5cf6; --radius:24px; --shadow:0 18px 48px rgba(0,0,0,.35); }}
     * {{ box-sizing:border-box; }}
-    body {{ margin:0; font-family:"Montserrat", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:radial-gradient(circle at top left, rgba(249,115,22,.16), transparent 30%), radial-gradient(circle at top right, rgba(59,130,246,.10), transparent 28%), linear-gradient(180deg,var(--bg),var(--bg-2)); color:var(--text); }}
+    body {{ margin:0; font-family:"Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:radial-gradient(circle at top left, rgba(249,115,22,.16), transparent 30%), radial-gradient(circle at top right, rgba(59,130,246,.10), transparent 28%), linear-gradient(180deg,var(--bg),var(--bg-2)); color:var(--text); }}
     .page {{ max-width:1120px; margin:0 auto; padding:28px; }}
     .card {{ background:rgba(17,24,39,.96); border:1px solid rgba(51,65,85,.95); border-top:5px solid var(--orange); border-radius:var(--radius); padding:24px; margin-bottom:20px; box-shadow:var(--shadow); }}
     h1 {{ margin:0 0 10px; font-size:clamp(34px,4vw,48px); letter-spacing:-.045em; }}

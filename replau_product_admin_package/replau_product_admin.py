@@ -915,7 +915,7 @@ def html_page(title: str, body: str, flash: str = "", auth_query: str = "") -> H
   <title>{esc(title)}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body {{ margin:0; font-family:Arial,sans-serif; background:#0f172a; color:#e5e7eb; }}
+    body {{ margin:0; font-family:"Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:#0f172a; color:#e5e7eb; }}
     .wrap {{ max-width:1300px; margin:0 auto; padding:22px; }}
     .top {{ display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:18px; }}
     h1 {{ margin:0; font-size:32px; }}
