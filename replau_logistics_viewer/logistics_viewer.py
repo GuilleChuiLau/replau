@@ -10,7 +10,7 @@ from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote, urlparse, parse_qs
 
 import requests
@@ -506,7 +506,8 @@ def email_clear_all_form_html(
         f"&email_status={quote(email_status, safe='')}"
     )
     return f"""
-      <form method="post" action="/email-logs/clear-all" onsubmit="return confirm('¿Limpiar todos los emails visibles de la cola logística? No se borran los registros.');">
+      <form method="post" action="/dashboard" onsubmit="return confirm('¿Limpiar todos los emails visibles de la cola logística? No se borran los registros.');">
+        <input type="hidden" name="clear_action" value="email_clear_all">
         <input type="hidden" name="view" value="{esc(view)}">
         <input type="hidden" name="search" value="{esc(search)}">
         <input type="hidden" name="order_status" value="{esc(order_status)}">
@@ -522,7 +523,9 @@ def email_clear_form_html(email_id: Any, next_url: str = "/dashboard") -> str:
     if email_id is None:
         return ""
     return f"""
-      <form method="post" action="/email-log/{esc(email_id)}/clear" onsubmit="return confirm('¿Limpiar este email de la cola logística? No se borra el registro.');">
+      <form method="post" action="/dashboard" onsubmit="return confirm('¿Limpiar este email de la cola logística? No se borra el registro.');">
+        <input type="hidden" name="clear_action" value="email_clear">
+        <input type="hidden" name="email_id" value="{esc(email_id)}">
         <input type="hidden" name="next_url" value="{esc(next_url)}">
         <button class="button good" type="submit">Clear</button>
       </form>
@@ -2850,6 +2853,33 @@ def dashboard(
             email_status=email_status,
         )
     )
+
+
+@app.post("/dashboard")
+def dashboard_action(
+    clear_action: str = Form(""),
+    email_id: Optional[int] = Form(None),
+    view: str = Form("all"),
+    search: str = Form(""),
+    order_status: str = Form("all"),
+    conv_status: str = Form("all"),
+    email_status: str = Form("all"),
+    next_url: str = Form("/dashboard"),
+) -> RedirectResponse:
+    if clear_action == "email_clear":
+        if email_id is None:
+            raise HTTPException(status_code=400, detail="Email inválido")
+        return clear_email_log(email_id=email_id, next_url=next_url)
+    if clear_action == "email_clear_all":
+        return clear_all_email_logs(
+            view=view,
+            search=search,
+            order_status=order_status,
+            conv_status=conv_status,
+            email_status=email_status,
+            next_url=next_url,
+        )
+    raise HTTPException(status_code=400, detail="Acción inválida")
 
 
 @app.get("/blocked", response_class=HTMLResponse)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ KITCHEN_HOST = os.environ.get("KITCHEN_HOST", "127.0.0.1")
 KITCHEN_PORT = int(os.environ.get("KITCHEN_PORT", "8791"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "30"))
 AUTO_REFRESH_SECONDS = int(os.environ.get("AUTO_REFRESH_SECONDS", "15"))
+CLEARED_KITCHEN_ORDERS_PATH = Path(os.environ.get("CLEARED_KITCHEN_ORDERS_PATH", "/home/guill/.openclaw/workspace/replau_cleared_kitchen_orders.json"))
 
 app = FastAPI(title="Replau Kitchen UI", version="1.0.0")
 
@@ -125,6 +127,52 @@ def post_rpc(name: str, payload: Dict[str, Any]) -> Any:
     )
 
 
+def load_cleared_kitchen_order_ids() -> set[int]:
+    try:
+        if CLEARED_KITCHEN_ORDERS_PATH.exists():
+            data = json.loads(CLEARED_KITCHEN_ORDERS_PATH.read_text(encoding="utf-8"))
+            return {int(v) for v in data.get("cleared_ids", [])}
+    except Exception:
+        pass
+    return set()
+
+
+def save_cleared_kitchen_order_ids(ids: set[int]) -> None:
+    CLEARED_KITCHEN_ORDERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CLEARED_KITCHEN_ORDERS_PATH.write_text(
+        json.dumps({"cleared_ids": sorted(ids)}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def fetch_kitchen_orders() -> list[Dict[str, Any]]:
+    orders = fetch_json("/v_kitchen_orders")
+    cleared = load_cleared_kitchen_order_ids()
+    if cleared:
+        orders = [row for row in orders if int(row.get("id") or 0) not in cleared]
+    return orders
+
+
+def kitchen_clear_form_html(order_id: Any, base: str = "") -> str:
+    if order_id is None:
+        return ""
+    return f"""
+      <form method="post" action="{base}/order/{esc(order_id)}/clear" onsubmit="return confirm('¿Limpiar este pedido del Kitchen Board? No cancela el pedido.');">
+        <button class="button good" type="submit">Clear</button>
+      </form>
+    """
+
+
+def kitchen_clear_all_form_html(count: int, base: str = "") -> str:
+    if count <= 0:
+        return ""
+    return f"""
+      <form method="post" action="{base}/orders/clear-all" onsubmit="return confirm('¿Limpiar todos los pedidos visibles del Kitchen Board? No cancela pedidos.');">
+        <button class="button good" type="submit">Clear all</button>
+      </form>
+    """
+
+
 def color_class(queue_color: str) -> str:
     queue_color = (queue_color or "").upper()
     if queue_color == "RED":
@@ -163,7 +211,7 @@ def health() -> Dict[str, Any]:
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
     base = public_prefix(request)
-    orders = fetch_json("/v_kitchen_orders")
+    orders = fetch_kitchen_orders()
     queue_counts = {
         "total": len(orders),
         "prep": len([o for o in orders if str(o.get("kitchen_status") or "").upper() == "EN_PREPARACION"]),
@@ -204,7 +252,7 @@ def dashboard(request: Request) -> HTMLResponse:
     cards = ""
     for order in orders:
         cards += f"""
-        <a class="{color_class(order.get('queue_color'))}" href="{base}/order/{order.get('id')}">
+        <article class="{color_class(order.get('queue_color'))}">
           <div class="station-card-head">
             <div>
               <div class="station-kicker">Cocina</div>
@@ -219,7 +267,11 @@ def dashboard(request: Request) -> HTMLResponse:
             <div><span>Pago</span><strong>{esc(order.get('metodo_pago'))}</strong></div>
             <div><span>Total</span><strong>{money(order.get('total'))}</strong></div>
           </div>
-        </a>
+          <div class="card-actions">
+            <a class="button" href="{base}/order/{order.get('id')}">Ver pedido</a>
+            {kitchen_clear_form_html(order.get('id'), base)}
+          </div>
+        </article>
         """
     if not cards:
         cards = '<div class="empty">No hay pedidos en cocina.</div>'
@@ -249,6 +301,7 @@ def dashboard(request: Request) -> HTMLResponse:
     .sub {{ color:var(--muted); font-size:15px; }}
     .actions {{ display:flex; flex-wrap:wrap; gap:10px; }}
     .button {{ display:inline-flex; align-items:center; justify-content:center; border:0; border-radius:14px; padding:11px 15px; background:linear-gradient(135deg,var(--brand),#6d28d9); color:white; text-decoration:none; cursor:pointer; font-size:14px; font-weight:850; box-shadow:0 10px 24px rgba(139,92,246,.24); }}
+    .button.good {{ background:linear-gradient(135deg,#16a34a,#15803d); box-shadow:0 10px 24px rgba(22,163,74,.20); }}
     .button.secondary {{ background:#374151; box-shadow:none; }}
     .legend {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:24px; color:#f8fafc; }}
     .legend span {{ padding:9px 14px; border-radius:999px; font-size:13px; font-weight:850; letter-spacing:.02em; border:1px solid rgba(255,255,255,.14); box-shadow:0 10px 24px rgba(0,0,0,.18); background:#020617; color:#cbd5e1; }}
@@ -287,6 +340,7 @@ def dashboard(request: Request) -> HTMLResponse:
     .station-facts div {{ background:rgba(139,92,246,.12); border:1px solid rgba(139,92,246,.25); border-radius:16px; padding:12px; }}
     .station-facts span {{ display:block; color:#94a3b8; font-size:12px; font-weight:850; text-transform:uppercase; letter-spacing:.06em; }}
     .station-facts strong {{ display:block; margin-top:4px; color:#f8fafc; }}
+    .card-actions {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:16px; position:relative; z-index:1; }}
     .empty {{ background:rgba(17,24,39,.88); border:1px solid rgba(51,65,85,.95); border-radius:24px; padding:34px; font-size:20px; text-align:center; box-shadow:var(--shadow); color:var(--muted); }}
     @media(max-width:900px) {{ .workspace-grid {{ grid-template-columns:1fr 1fr; }} .workspace-row {{ grid-template-columns:1fr; }} }}
     @media(max-width:700px) {{ .wrap {{ padding:14px; }} .grid {{ grid-template-columns:1fr; }} .topbar {{ display:block; }} .actions {{ margin-top:14px; }} }}
@@ -302,6 +356,7 @@ def dashboard(request: Request) -> HTMLResponse:
       </div>
       <div class="actions">
         <a class="button" href="{base}/">Actualizar</a>
+        {kitchen_clear_all_form_html(len(orders), base)}
         <a class="button secondary" href="http://127.0.0.1:8790/ops/picking">Picking</a>
         <a class="button secondary" href="http://127.0.0.1:8790/ops/delivery">Delivery</a>
       </div>
@@ -321,6 +376,25 @@ def dashboard(request: Request) -> HTMLResponse:
 @app.get("/api/orders", response_class=JSONResponse)
 def api_orders() -> JSONResponse:
     return JSONResponse(fetch_json("/v_kitchen_orders"))
+
+
+@app.post("/order/{pedido_id}/clear")
+def clear_kitchen_order(pedido_id: int, request: Request) -> RedirectResponse:
+    cleared = load_cleared_kitchen_order_ids()
+    cleared.add(pedido_id)
+    save_cleared_kitchen_order_ids(cleared)
+    return RedirectResponse(url=f"{public_prefix(request)}/", status_code=303)
+
+
+@app.post("/orders/clear-all")
+def clear_all_kitchen_orders(request: Request) -> RedirectResponse:
+    orders = fetch_kitchen_orders()
+    visible_ids = {int(row.get("id")) for row in orders if row.get("id") is not None}
+    if visible_ids:
+        cleared = load_cleared_kitchen_order_ids()
+        cleared.update(visible_ids)
+        save_cleared_kitchen_order_ids(cleared)
+    return RedirectResponse(url=f"{public_prefix(request)}/", status_code=303)
 
 
 @app.get("/order/{pedido_id}", response_class=HTMLResponse)

@@ -301,11 +301,19 @@ class QA:
             ]
             email_clear_all_forms = [
                 form for form in parser.forms
-                if form.get("action", "") == "/email-logs/clear-all"
+                if form.get("action", "") in {"/email-logs/clear-all", "/dashboard"}
+                and self.form_data(form).get("clear_action") == "email_clear_all"
             ]
             email_clear_forms = [
                 form for form in parser.forms
-                if "/email-log/" in form.get("action", "") and form.get("action", "").endswith("/clear")
+                if (
+                    "/email-log/" in form.get("action", "")
+                    and form.get("action", "").endswith("/clear")
+                )
+                or (
+                    form.get("action", "") == "/dashboard"
+                    and self.form_data(form).get("clear_action") == "email_clear"
+                )
             ]
             active_conversations = self.get_json(
                 self.cfg.postgrest + "/v_whatsapp_conversaciones?estado=not.in.(CONFIRMED,ANULADO,CANCELLED)&limit=1&select=id"
@@ -385,10 +393,27 @@ class QA:
             else:
                 self.fail("kitchen board missing Kitchen Workspace")
             self.check_links("kitchen board", self.cfg.kitchen + "/", root[1])
+            kitchen_clear_all_forms = [
+                form for form in root[1].forms
+                if form.get("action", "").endswith("/orders/clear-all")
+            ]
+            kitchen_clear_forms = [
+                form for form in root[1].forms
+                if "/order/" in form.get("action", "") and form.get("action", "").endswith("/clear")
+            ]
         rows = self.get_json(self.cfg.postgrest + "/v_kitchen_orders?order=id.desc&limit=1")
         if not rows:
             self.warn("No kitchen orders available")
             return
+        if root:
+            if kitchen_clear_all_forms:
+                self.ok("kitchen board includes Clear all button")
+            else:
+                self.fail("kitchen board missing Clear all button")
+            if kitchen_clear_forms:
+                self.ok("kitchen board includes order Clear buttons")
+            else:
+                self.fail("kitchen board missing order Clear buttons")
         pedido_id = rows[0]["id"]
         detail_url = self.cfg.kitchen + f"/order/{pedido_id}"
         got = self.fetch_html("kitchen order detail", detail_url)
