@@ -518,6 +518,17 @@ def email_clear_all_form_html(
     """
 
 
+def email_clear_form_html(email_id: Any, next_url: str = "/dashboard") -> str:
+    if email_id is None:
+        return ""
+    return f"""
+      <form method="post" action="/email-log/{esc(email_id)}/clear" onsubmit="return confirm('¿Limpiar este email de la cola logística? No se borra el registro.');">
+        <input type="hidden" name="next_url" value="{esc(next_url)}">
+        <button class="button good" type="submit">Clear</button>
+      </form>
+    """
+
+
 def esc(value: Any) -> str:
     if value is None:
         return ""
@@ -924,6 +935,13 @@ def render_dashboard_page(
     conversations = data["conversations"]
     email_logs = data["email_logs"]
     reservations = data["reservations"]
+    dashboard_next_url = (
+        f"/dashboard?view={quote(view, safe='')}"
+        f"&search={quote(search, safe='')}"
+        f"&order_status={quote(order_status, safe='')}"
+        f"&conv_status={quote(conv_status, safe='')}"
+        f"&email_status={quote(email_status, safe='')}"
+    )
 
     urgent_conversations = [c for c in data["conversations"] if c.get("estado") == "WAITING_ADDRESS_CONFIRMATION"][:5]
     urgent_emails = [e for e in data["email_logs"] if e.get("status") in {"ERROR", "PENDING"}][:5]
@@ -1086,7 +1104,7 @@ def render_dashboard_page(
           <td>{esc(trim_text(log.get('subject'), 80))}</td>
           <td>{esc(trim_text(log.get('error_message'), 80))}</td>
           <td>{esc(log.get('created_at'))}</td>
-          <td><form method="post" action="/email-log/{esc(log.get('id'))}/clear" onsubmit="return confirm('¿Limpiar este email de la cola logística? No se borra el registro.');"><button class="button good" type="submit">Clear</button></form></td>
+          <td>{email_clear_form_html(log.get('id'), dashboard_next_url)}</td>
         </tr>
         """
 
@@ -1100,7 +1118,7 @@ def render_dashboard_page(
         for c in urgent_conversations
     ) or '<div class="list-item">Nada urgente en conversaciones.</div>'
     urgent_email_list = "".join(
-        f'''<div class="list-item"><strong>Pedido {esc(e.get("pedido_id"))}</strong><div>{badge_html(e.get("status"))}</div><div class="tiny">{esc(trim_text(e.get("subject"), 90))}</div></div>'''
+        f'''<div class="list-item"><strong>Pedido {esc(e.get("pedido_id"))}</strong><div style="display:flex;gap:8px;flex-wrap:wrap">{badge_html(e.get("status"))}{email_clear_form_html(e.get("id"), dashboard_next_url)}</div><div class="tiny">{esc(trim_text(e.get("subject"), 90))}</div></div>'''
         for e in urgent_emails
     ) or '<div class="list-item">Sin emails urgentes.</div>'
     dispatch_list = "".join(
@@ -2852,11 +2870,12 @@ def blocked_numbers_unblock(whatsapp_number: str = Form(...)) -> RedirectRespons
 
 
 @app.post("/email-log/{email_id}/clear")
-def clear_email_log(email_id: int) -> RedirectResponse:
+def clear_email_log(email_id: int, next_url: str = Form("/dashboard")) -> RedirectResponse:
     cleared = load_cleared_email_ids()
     cleared.add(email_id)
     save_cleared_email_ids(cleared)
-    return RedirectResponse(url="/dashboard", status_code=303)
+    target = next_url if next_url.startswith("/") else "/dashboard"
+    return RedirectResponse(url=target, status_code=303)
 
 
 @app.post("/email-logs/clear-all")
