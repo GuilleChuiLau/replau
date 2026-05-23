@@ -8,6 +8,14 @@ This tree is the source of truth for local Replau service code:
 
 Deployed runtime copies live under `/opt/replau_*`. The release workflow is intentionally local-first until a remote GitHub/GitLab repository is connected.
 
+Hosted CI runs `.github/workflows/replau-ci.yml`. It executes the static part of the gate with:
+
+```bash
+python3 replau_ci_cd_gate.py --skip-deploy-drift --skip-http
+```
+
+The full release gate still runs locally because it needs live systemd services, `/opt/replau_*` deployed copies, protected dashboard tokens, and local PostgREST/OpenClaw endpoints.
+
 ## Normal Change Flow
 
 1. Edit source files under `/home/guill/codex`.

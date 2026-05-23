@@ -22,7 +22,7 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 
-ROOT = Path("/home/guill/codex")
+ROOT = Path(os.environ.get("REPLAU_SOURCE_ROOT", Path(__file__).resolve().parent)).resolve()
 
 
 @dataclass(frozen=True)
@@ -308,6 +308,7 @@ def check_git_clean(gate: Gate) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the Replau local CI/CD gate.")
+    parser.add_argument("--skip-deploy-drift", action="store_true", help="Skip source-vs-/opt deployed runtime drift checks.")
     parser.add_argument("--skip-http", action="store_true", help="Skip local HTTP health probes.")
     parser.add_argument("--systemd", action="store_true", help="Also require key systemd services to be active.")
     parser.add_argument("--require-clean-git", action="store_true", help="Fail unless /home/guill/codex has no uncommitted git changes.")
@@ -319,7 +320,8 @@ def main() -> int:
 
     gate = Gate()
     check_python_compile(gate)
-    check_source_deploy_drift(gate)
+    if not args.skip_deploy_drift:
+        check_source_deploy_drift(gate)
     if args.require_clean_git:
         check_git_clean(gate)
     if args.systemd:

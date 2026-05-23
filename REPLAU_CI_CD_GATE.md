@@ -17,6 +17,7 @@ Default checks:
 
 Optional checks:
 
+- `--skip-deploy-drift` skips `/opt/replau_*` drift checks for hosted CI environments that do not have local runtime copies.
 - `--systemd` requires key system services and the OpenClaw gateway user service to be active.
 - `--require-clean-git` requires `/home/guill/codex` to have no uncommitted changes.
 
@@ -34,6 +35,9 @@ Recommended release commands:
 
 # Static-only check when services are intentionally stopped
 /home/guill/codex/replau_ci_cd_gate.py --skip-http
+
+# Hosted CI static check without local /opt runtime copies
+python3 replau_ci_cd_gate.py --skip-deploy-drift --skip-http
 ```
 
 Operational notes:
