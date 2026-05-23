@@ -299,6 +299,10 @@ class QA:
                 form for form in parser.forms
                 if form.get("action", "") == "/conversations/clear-all"
             ]
+            email_clear_all_forms = [
+                form for form in parser.forms
+                if form.get("action", "") == "/email-logs/clear-all"
+            ]
             active_conversations = self.get_json(
                 self.cfg.postgrest + "/v_whatsapp_conversaciones?estado=not.in.(CONFIRMED,ANULADO,CANCELLED)&limit=1&select=id"
             )
@@ -313,6 +317,12 @@ class QA:
                     self.fail("logistics dashboard missing conversation Clear buttons")
                 else:
                     self.ok("No active conversations available; conversation Clear buttons hidden")
+            if email_clear_all_forms:
+                self.ok("logistics dashboard includes email Clear all button")
+            elif "Cola de email logística (0)" not in html:
+                self.fail("logistics dashboard missing email Clear all button")
+            else:
+                self.ok("No email logs available; email Clear all button hidden")
 
         # Test key logistics forms and redirects.
         for page_name in ["logistics public order", "logistics picking", "logistics delivery"]:

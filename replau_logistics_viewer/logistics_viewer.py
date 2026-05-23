@@ -488,6 +488,36 @@ def conversation_clear_all_form_html(count: int, next_url: str = "/dashboard?vie
     """
 
 
+def email_clear_all_form_html(
+    count: int,
+    view: str = "all",
+    search: str = "",
+    order_status: str = "all",
+    conv_status: str = "all",
+    email_status: str = "all",
+) -> str:
+    if count <= 0:
+        return ""
+    next_url = (
+        f"/dashboard?view={quote(view, safe='')}"
+        f"&search={quote(search, safe='')}"
+        f"&order_status={quote(order_status, safe='')}"
+        f"&conv_status={quote(conv_status, safe='')}"
+        f"&email_status={quote(email_status, safe='')}"
+    )
+    return f"""
+      <form method="post" action="/email-logs/clear-all" onsubmit="return confirm('¿Limpiar todos los emails visibles de la cola logística? No se borran los registros.');">
+        <input type="hidden" name="view" value="{esc(view)}">
+        <input type="hidden" name="search" value="{esc(search)}">
+        <input type="hidden" name="order_status" value="{esc(order_status)}">
+        <input type="hidden" name="conv_status" value="{esc(conv_status)}">
+        <input type="hidden" name="email_status" value="{esc(email_status)}">
+        <input type="hidden" name="next_url" value="{esc(next_url)}">
+        <button class="button good" type="submit">Clear all</button>
+      </form>
+    """
+
+
 def esc(value: Any) -> str:
     if value is None:
         return ""
@@ -1248,7 +1278,10 @@ def render_dashboard_page(
           <div class="panel priority-red">
             <div class="panel-head">
               <h2>Cola de email logística ({len(email_logs)})</h2>
-              <div class="panel-sub">Últimos correos generados</div>
+              <div class="actions">
+                <div class="panel-sub">Últimos correos generados</div>
+                {email_clear_all_form_html(len(email_logs), view, search, order_status, conv_status, email_status)}
+              </div>
             </div>
             <div class="chips" style="margin-bottom:12px">{email_filter_html}</div>
             <div class="list" style="margin-bottom:12px">{urgent_email_list}</div>
@@ -2824,6 +2857,30 @@ def clear_email_log(email_id: int) -> RedirectResponse:
     cleared.add(email_id)
     save_cleared_email_ids(cleared)
     return RedirectResponse(url="/dashboard", status_code=303)
+
+
+@app.post("/email-logs/clear-all")
+def clear_all_email_logs(
+    view: str = Form("all"),
+    search: str = Form(""),
+    order_status: str = Form("all"),
+    conv_status: str = Form("all"),
+    email_status: str = Form("all"),
+    next_url: str = Form("/dashboard"),
+) -> RedirectResponse:
+    data = fetch_dashboard_data()
+    filtered = filter_dashboard_data(data, view, search, order_status, conv_status, email_status)
+    visible_ids = {
+        int(row.get("id"))
+        for row in filtered["email_logs"]
+        if row.get("id") is not None
+    }
+    if visible_ids:
+        cleared = load_cleared_email_ids()
+        cleared.update(visible_ids)
+        save_cleared_email_ids(cleared)
+    target = next_url if next_url.startswith("/") else "/dashboard"
+    return RedirectResponse(url=target, status_code=303)
 
 
 @app.post("/conversation/{whatsapp_number}/clear")
