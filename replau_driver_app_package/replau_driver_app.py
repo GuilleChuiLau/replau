@@ -176,9 +176,9 @@ def layout(title: str, body: str, *, auth_query: str = "", flash: str = "") -> H
     th, td {{ border-bottom:1px solid #334155; padding:9px; text-align:left; vertical-align:top; }}
     th {{ color:#93c5fd; }}
     .badge {{ display:inline-block; border-radius:999px; padding:4px 8px; font-size:12px; font-weight:800; background:#334155; color:#e5e7eb; }}
-    .APPROVED, .ACTIVE, .PASSED, .VERIFIED {{ background:#14532d; color:#bbf7d0; }}
-    .REJECTED, .SUSPENDED, .FAILED {{ background:#7f1d1d; color:#fecaca; }}
-    .CREATED, .CONSENTED, .SUBMITTED {{ background:#1e3a8a; color:#bfdbfe; }}
+    .APPROVED, .ACTIVE, .PASSED, .VERIFIED, .ASSIGNED, .ACCEPTED, .ONLINE {{ background:#14532d; color:#bbf7d0; }}
+    .REJECTED, .SUSPENDED, .FAILED, .CANCELLED, .EXPIRED, .LOST {{ background:#7f1d1d; color:#fecaca; }}
+    .CREATED, .CONSENTED, .SUBMITTED, .OFFERED, .VIEWED, .OPEN {{ background:#1e3a8a; color:#bfdbfe; }}
     .code {{ font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; }}
     @media(max-width:860px) {{ .grid,.kpis {{ grid-template-columns:1fr; }} }}
   </style>
@@ -573,12 +573,29 @@ def ops_driver_dispatch(
     )
     mappings = pg_get("/v_order_pickup_points?order=pedido_id.desc&limit=50")
     candidates = pg_get("/v_delivery_offer_candidates?order=batch_created_at.desc,score.asc&limit=50")
+    online_sessions = pg_get("/driver_online_sessions?select=id&status=eq.ONLINE&limit=200")
     mapping_by_order = {row.get("pedido_id"): row for row in mappings}
+    active_pickups = [p for p in pickups if p.get("activo")]
+    open_candidates = [c for c in candidates if c.get("status") in {"OFFERED", "VIEWED"} and c.get("batch_status") == "OPEN"]
 
-    pickup_options = "".join(
-        f"<option value='{esc(p.get('id'))}'>{esc(p.get('codigo'))} - {esc(p.get('nombre'))}</option>"
-        for p in pickups if p.get("activo")
-    )
+    def pickup_options_for(selected_id: Any) -> str:
+        options = []
+        for pickup in active_pickups:
+            selected = " selected" if pickup.get("id") == selected_id else ""
+            options.append(
+                f"<option value='{esc(pickup.get('id'))}'{selected}>"
+                f"{esc(pickup.get('codigo'))} - {esc(pickup.get('nombre'))}</option>"
+            )
+        return "".join(options)
+
+    kpis = f"""
+    <div class="kpis">
+      <div class="kpi"><span>Active pickups</span><strong>{len(active_pickups)}</strong></div>
+      <div class="kpi"><span>Mapped orders</span><strong>{len(mappings)}</strong></div>
+      <div class="kpi"><span>Open offers</span><strong>{len(open_candidates)}</strong></div>
+      <div class="kpi"><span>Online drivers</span><strong>{len(online_sessions)}</strong></div>
+    </div>
+    """
     pickup_rows = "".join(
         f"""
         <tr>
@@ -594,22 +611,28 @@ def ops_driver_dispatch(
     order_rows = ""
     for order in orders:
         mapping = mapping_by_order.get(order.get("id"), {})
+        selected_pickup_id = mapping.get("pickup_point_id")
+        mapping_badge = (
+            f'{badge("MAPPED")}<br><span class="muted">{esc(mapping.get("pickup_codigo"))}</span>'
+            if mapping else badge("UNMAPPED")
+        )
+        offer_disabled = "" if active_pickups else " disabled"
         order_rows += f"""
         <tr>
           <td><strong>{esc(order.get('pedido_num'))}</strong><br>{badge(order.get('estado'))}</td>
           <td>{esc(order.get('direccion_confirmada') or order.get('direccion_detectada') or '')}</td>
-          <td>{esc(mapping.get('pickup_codigo') or '')}</td>
+          <td>{mapping_badge}</td>
           <td>
             <form method="post" action="{with_token('/ops/orders/' + str(order.get('id')) + '/pickup', request)}">
-              <select name="pickup_point_id" required>{pickup_options}</select>
-              <button type="submit">Set pickup</button>
+              <select name="pickup_point_id" required>{pickup_options_for(selected_pickup_id)}</select>
+              <button type="submit">Set</button>
             </form>
           </td>
           <td>
             <form method="post" action="{with_token('/ops/orders/' + str(order.get('id')) + '/offer-nearby', request)}">
               <input name="radius_km" placeholder="8.05" style="max-width:80px">
               <input name="max_candidates" placeholder="5" style="max-width:58px">
-              <button type="submit">Offer nearby</button>
+              <button type="submit"{offer_disabled}>Offer</button>
             </form>
           </td>
         </tr>
@@ -618,16 +641,18 @@ def ops_driver_dispatch(
     candidate_rows = "".join(
         f"""
         <tr>
-          <td><strong>{esc(c.get('pedido_num'))}</strong><br><span class="muted">{esc(c.get('pickup_codigo') or '')}</span></td>
+          <td><strong>{esc(c.get('pedido_num'))}</strong><br><span class="muted code">batch {esc(c.get('batch_id'))}</span></td>
+          <td><strong>{esc(c.get('pickup_codigo') or '')}</strong><br><span class="muted">{esc(c.get('pickup_nombre') or '')}</span></td>
           <td>{esc(c.get('driver_name'))}<br><span class="muted code">{esc(c.get('driver_phone'))}</span></td>
-          <td>{esc(c.get('distance_km'))} km</td>
-          <td>{badge(c.get('status'))}<br><span class="muted">{esc(c.get('batch_status'))}</span></td>
+          <td>{esc(c.get('distance_km'))} km<br><span class="muted">{esc(c.get('eta_seconds'))} sec</span></td>
+          <td>{badge(c.get('status'))}<br>{badge(c.get('batch_status'))}</td>
           <td>{esc(c.get('offered_at'))}</td>
         </tr>
         """
         for c in candidates
-    ) or '<tr><td colspan="5" class="muted">No nearby offers yet.</td></tr>'
+    ) or '<tr><td colspan="6" class="muted">No nearby offers yet.</td></tr>'
     body = f"""
+    <section class="panel">{kpis}</section>
     <section class="panel">
       <h2>Pickup points</h2>
       <form method="post" action="{with_token('/ops/pickup-points', request)}">
@@ -647,7 +672,7 @@ def ops_driver_dispatch(
     </section>
     <section class="panel">
       <h2>Nearby offer candidates</h2>
-      <table><thead><tr><th>Order</th><th>Driver</th><th>Distance</th><th>Status</th><th>Offered</th></tr></thead><tbody>{candidate_rows}</tbody></table>
+      <table><thead><tr><th>Order</th><th>Pickup</th><th>Driver</th><th>Distance</th><th>Status</th><th>Offered</th></tr></thead><tbody>{candidate_rows}</tbody></table>
     </section>
     """
     return layout("Driver Dispatch", body, auth_query=token_query(request), flash=flash)
