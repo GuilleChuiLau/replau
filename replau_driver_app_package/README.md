@@ -110,6 +110,25 @@ http://127.0.0.1:8796/ops/driver-dispatch
 http://localhost/driver
 ```
 
+## Phase 3 driver app
+
+Phase 3 adds a browser-usable driver dashboard on top of the existing APIs:
+
+```text
+http://localhost/driver
+http://127.0.0.1:8796/driver/app/{driver_account_id}
+```
+
+Drivers can:
+
+- open the app by phone number
+- see approval and online/offline status
+- go online with optional starting coordinates
+- update current location while online
+- see open nearby offers
+- accept or decline an offer
+- see active assignment status
+
 ## Dispatch smoke test
 
 Run after Phase 2 install:
@@ -127,7 +146,7 @@ The smoke test uses the app and PostgREST APIs to:
 - put the driver online and post a fresh location
 - map the order to the pickup
 - create a nearby offer batch
-- accept the offer through `/api/driver/{account_id}/offers/{candidate_id}/accept`
+- accept the offer through `/driver/app/{account_id}/offers/{candidate_id}/accept`
 - verify the assignment and delivery-station visibility
 - clean up by cancelling the assignment/offer and restoring original fixture state
 

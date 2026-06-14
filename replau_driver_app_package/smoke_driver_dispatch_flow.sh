@@ -208,16 +208,22 @@ offer_result="$(pg_post "/rpc/driver_create_nearby_offer_batch" "{\"p_pedido_id\
 jq -e '.ok == true and .candidate_count >= 1' <<<"${offer_result}" >/dev/null
 batch_id="$(jq -r '.batch_id' <<<"${offer_result}")"
 
-echo "[8/9] Accepting offer through driver app API"
+echo "[8/9] Accepting offer through driver app dashboard"
 offers="$(curl -fsS "${APP_BASE_URL}/api/driver/${driver_account_id}/offers")"
 candidate_id="$(jq -r --argjson pedido_id "${pedido_id}" '.offers[] | select(.pedido_id == $pedido_id) | .id' <<<"${offers}" | head -n1)"
 if [[ -z "${candidate_id}" ]]; then
   echo "Driver offers API did not return the created candidate" >&2
   exit 1
 fi
-assignment_result="$(app_post_form "/api/driver/${driver_account_id}/offers/${candidate_id}/accept")"
-jq -e '.ok == true and .assignment_id' <<<"${assignment_result}" >/dev/null
-assignment_id="$(jq -r '.assignment_id' <<<"${assignment_result}")"
+curl -fsS -X POST "${APP_BASE_URL}/driver/app/${driver_account_id}/offers/${candidate_id}/accept" -o /dev/null
+assignment_id="$(
+  pg_get "/delivery_offer_candidates?id=eq.${candidate_id}&select=accepted_assignment_id&limit=1" |
+    jq -r '.[0].accepted_assignment_id // empty'
+)"
+if [[ -z "${assignment_id}" ]]; then
+  echo "Driver app accept route did not create an assignment" >&2
+  exit 1
+fi
 
 echo "[9/9] Verifying assignment and delivery station visibility"
 assignment_row="$(pg_get "/delivery_asignaciones?id=eq.${assignment_id}&select=id,pedido_id,repartidor_id,status&limit=1" | first_row)"

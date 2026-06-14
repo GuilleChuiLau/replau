@@ -170,6 +170,8 @@ def layout(title: str, body: str, *, auth_query: str = "", flash: str = "") -> H
     button, .button {{ display:inline-block; border:0; border-radius:8px; padding:10px 13px; background:#2563eb; color:white; font-weight:800; cursor:pointer; }}
     button.good, .button.good {{ background:#166534; }}
     button.bad, .button.bad {{ background:#991b1b; }}
+    button.ghost, .button.ghost {{ background:#334155; }}
+    button:disabled {{ opacity:.45; cursor:not-allowed; }}
     .muted {{ color:#94a3b8; }}
     .flash {{ border:1px solid #0e7490; background:#083344; color:#cffafe; border-radius:8px; padding:12px; margin:12px 0; }}
     table {{ width:100%; border-collapse:collapse; font-size:14px; }}
@@ -180,6 +182,7 @@ def layout(title: str, body: str, *, auth_query: str = "", flash: str = "") -> H
     .REJECTED, .SUSPENDED, .FAILED, .CANCELLED, .EXPIRED, .LOST {{ background:#7f1d1d; color:#fecaca; }}
     .CREATED, .CONSENTED, .SUBMITTED, .OFFERED, .VIEWED, .OPEN {{ background:#1e3a8a; color:#bfdbfe; }}
     .code {{ font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; }}
+    .actions {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
     @media(max-width:860px) {{ .grid,.kpis {{ grid-template-columns:1fr; }} }}
   </style>
 </head>
@@ -252,6 +255,15 @@ def driver_home(flash: str = "") -> HTMLResponse:
     body = """
     <div class="grid">
       <section class="panel">
+        <h2>Driver app</h2>
+        <form method="post" action="/driver/app/login">
+          <label>Phone
+            <input name="phone" inputmode="tel" placeholder="51999999999" required>
+          </label>
+          <button class="good" type="submit">Open app</button>
+        </form>
+      </section>
+      <section class="panel">
         <h2>Apply as a driver</h2>
         <form method="post" action="/driver/signup">
           <label>Phone with country code
@@ -276,10 +288,6 @@ def driver_home(flash: str = "") -> HTMLResponse:
         </form>
       </section>
     </div>
-    <section class="panel">
-      <h2>Phase 1 pilot scope</h2>
-      <p class="muted">This app is the onboarding and verification surface. Real dispatch remains blocked until operations approves the driver and links the account to an authorized repartidor.</p>
-    </section>
     """
     return layout("Replau Driver", body, flash=flash)
 
@@ -320,6 +328,187 @@ def driver_status(phone: str) -> HTMLResponse:
     if not rows:
         return layout("Application not found", '<div class="panel"><p>No application found for that phone.</p><a class="button" href="/driver">Back</a></div>')
     return driver_application(int(rows[0]["id"]))
+
+
+def driver_app_url(account_id: int, flash: str = "") -> str:
+    suffix = "?flash=" + quote(flash, safe="") if flash else ""
+    return f"/driver/app/{account_id}{suffix}"
+
+
+@app.post("/driver/app/login")
+def driver_app_login(phone: str = Form(...)) -> RedirectResponse:
+    clean = clean_phone(phone)
+    rows = pg_get(f"/v_driver_accounts?phone=eq.{quote(clean, safe='')}&limit=1")
+    if not rows:
+        return RedirectResponse(url="/driver?flash=Application+not+found", status_code=303)
+    return RedirectResponse(url=driver_app_url(int(rows[0]["id"])), status_code=303)
+
+
+@app.get("/driver/app/{account_id}", response_class=HTMLResponse)
+def driver_app_dashboard(account_id: int, flash: str = "") -> HTMLResponse:
+    rows = pg_get(f"/v_driver_accounts?id=eq.{account_id}&limit=1")
+    if not rows:
+        raise HTTPException(status_code=404, detail="Driver account not found")
+    account = rows[0]
+    repartidor_id = account.get("repartidor_id")
+    approved = account.get("status") in {"APPROVED", "ACTIVE"} and repartidor_id is not None
+    sessions = pg_get(
+        f"/driver_online_sessions?driver_account_id=eq.{account_id}&status=eq.ONLINE&order=started_at.desc&limit=1"
+    )
+    session = sessions[0] if sessions else {}
+    online = bool(session)
+    offers = pg_get(
+        "/v_delivery_offer_candidates"
+        f"?driver_account_id=eq.{account_id}"
+        "&status=in.(OFFERED,VIEWED)"
+        "&batch_status=eq.OPEN"
+        "&order=offered_at.desc"
+        "&limit=10"
+    ) if approved else []
+    assignments = []
+    if repartidor_id:
+        assignments = pg_get(
+            f"/v_delivery_asignaciones?repartidor_id=eq.{repartidor_id}"
+            "&status=in.(ACCEPTED,ASSIGNED)"
+            "&order=assigned_at.desc"
+            "&limit=5"
+        )
+
+    offer_rows = "".join(
+        f"""
+        <tr>
+          <td><strong>{esc(o.get('pedido_num'))}</strong><br>{badge(o.get('pedido_estado'))}</td>
+          <td><strong>{esc(o.get('pickup_codigo') or '')}</strong><br><span class="muted">{esc(o.get('pickup_direccion') or '')}</span></td>
+          <td>{esc(o.get('distance_km'))} km<br><span class="muted">{esc(o.get('eta_seconds'))} sec</span></td>
+          <td>{badge(o.get('status'))}<br><span class="muted">{esc(o.get('expires_at'))}</span></td>
+          <td>
+            <div class="actions">
+              <form method="post" action="/driver/app/{account_id}/offers/{esc(o.get('id'))}/accept">
+                <button class="good" type="submit">Accept</button>
+              </form>
+              <form method="post" action="/driver/app/{account_id}/offers/{esc(o.get('id'))}/decline">
+                <button class="bad" type="submit">Decline</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        """
+        for o in offers
+    ) or '<tr><td colspan="5" class="muted">No open offers.</td></tr>'
+    assignment_rows = "".join(
+        f"""
+        <tr>
+          <td><strong>{esc(a.get('pedido_num'))}</strong><br>{badge(a.get('pedido_estado'))}</td>
+          <td>{badge(a.get('status'))}<br><span class="muted">{esc(a.get('assigned_at'))}</span></td>
+          <td>S/ {esc(a.get('fee'))}</td>
+          <td class="code">{esc(a.get('driver_latitude'))}, {esc(a.get('driver_longitude'))}<br><span class="muted">{esc(a.get('driver_location_at') or '')}</span></td>
+        </tr>
+        """
+        for a in assignments
+    ) or '<tr><td colspan="4" class="muted">No active assignment.</td></tr>'
+    online_controls = f"""
+      <form method="post" action="/driver/app/{account_id}/offline">
+        <button class="bad" type="submit">Go offline</button>
+      </form>
+      <form method="post" action="/driver/app/{account_id}/location">
+        <input type="hidden" name="session_id" value="{esc(session.get('id'))}">
+        <label>Latitude <input name="latitude" placeholder="-12.1111" required></label>
+        <label>Longitude <input name="longitude" placeholder="-77.0300" required></label>
+        <button type="submit">Update location</button>
+      </form>
+    """ if online else f"""
+      <form method="post" action="/driver/app/{account_id}/online">
+        <label>Latitude <input name="latitude" placeholder="-12.1111"></label>
+        <label>Longitude <input name="longitude" placeholder="-77.0300"></label>
+        <button class="good" type="submit" {'disabled' if not approved else ''}>Go online</button>
+      </form>
+    """
+    approval_note = "" if approved else '<p class="muted">Approval and repartidor link are required before going online.</p>'
+    body = f"""
+    <section class="panel">
+      <h2>{esc(account.get('legal_name'))}</h2>
+      <div class="kpis">
+        <div class="kpi"><span>Account</span><strong>{badge(account.get('status'))}</strong></div>
+        <div class="kpi"><span>Online</span><strong>{badge('ONLINE' if online else 'OFFLINE')}</strong></div>
+        <div class="kpi"><span>Open offers</span><strong>{len(offers)}</strong></div>
+        <div class="kpi"><span>Assignments</span><strong>{len(assignments)}</strong></div>
+      </div>
+    </section>
+    <div class="grid">
+      <section class="panel">
+        <h2>Availability</h2>
+        {approval_note}
+        {online_controls}
+      </section>
+      <section class="panel">
+        <h2>Profile</h2>
+        <p><strong>Phone:</strong> {esc(account.get('phone'))}</p>
+        <p><strong>Driver code:</strong> {esc(account.get('repartidor_codigo') or '')}</p>
+        <p><strong>Last session:</strong> {esc(session.get('started_at') or 'Offline')}</p>
+      </section>
+    </div>
+    <section class="panel">
+      <h2>Offers</h2>
+      <table><thead><tr><th>Order</th><th>Pickup</th><th>Distance</th><th>Status</th><th>Action</th></tr></thead><tbody>{offer_rows}</tbody></table>
+    </section>
+    <section class="panel">
+      <h2>Current assignment</h2>
+      <table><thead><tr><th>Order</th><th>Status</th><th>Fee</th><th>Location</th></tr></thead><tbody>{assignment_rows}</tbody></table>
+    </section>
+    """
+    return layout("Driver App", body, flash=flash)
+
+
+@app.post("/driver/app/{account_id}/online")
+def driver_app_online(
+    account_id: int,
+    latitude: str = Form(""),
+    longitude: str = Form(""),
+) -> RedirectResponse:
+    result = api_driver_online(account_id, device_id="driver-web", app_version="phase3-web")
+    payload = json.loads(result.body.decode("utf-8"))
+    lat = parse_optional_float(latitude)
+    lon = parse_optional_float(longitude)
+    if lat is not None and lon is not None:
+        api_driver_location(account_id, int(payload["session_id"]), lat, lon, 10)
+    return RedirectResponse(url=driver_app_url(account_id, "Online"), status_code=303)
+
+
+@app.post("/driver/app/{account_id}/offline")
+def driver_app_offline(account_id: int) -> RedirectResponse:
+    api_driver_offline(account_id)
+    return RedirectResponse(url=driver_app_url(account_id, "Offline"), status_code=303)
+
+
+@app.post("/driver/app/{account_id}/location")
+def driver_app_location(
+    account_id: int,
+    session_id: int = Form(...),
+    latitude: float = Form(...),
+    longitude: float = Form(...),
+) -> RedirectResponse:
+    api_driver_location(account_id, session_id, latitude, longitude, 10)
+    return RedirectResponse(url=driver_app_url(account_id, "Location updated"), status_code=303)
+
+
+@app.post("/driver/app/{account_id}/offers/{candidate_id}/accept")
+def driver_app_offer_accept(account_id: int, candidate_id: int) -> RedirectResponse:
+    result = pg_rpc("driver_accept_nearby_offer", {
+        "p_driver_account_id": account_id,
+        "p_candidate_id": candidate_id,
+    })
+    flash = "Offer accepted" if result.get("ok") else str(result.get("error") or "Offer not accepted")
+    return RedirectResponse(url=driver_app_url(account_id, flash), status_code=303)
+
+
+@app.post("/driver/app/{account_id}/offers/{candidate_id}/decline")
+def driver_app_offer_decline(account_id: int, candidate_id: int) -> RedirectResponse:
+    result = pg_rpc("driver_decline_nearby_offer", {
+        "p_driver_account_id": account_id,
+        "p_candidate_id": candidate_id,
+    })
+    flash = "Offer declined" if result.get("ok") else str(result.get("error") or "Offer not declined")
+    return RedirectResponse(url=driver_app_url(account_id, flash), status_code=303)
 
 
 @app.get("/driver/application/{account_id}", response_class=HTMLResponse)
