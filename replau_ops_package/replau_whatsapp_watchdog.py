@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import urlopen
 
+POSTGREST_BASE_URL = os.environ.get("POSTGREST_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
 GATEWAY_HEALTH_URL = os.environ.get("OPENCLAW_GATEWAY_HEALTH_URL", "http://127.0.0.1:18789/health")
 OPENCLAW_CLI = os.environ.get("OPENCLAW_HEALTH_CLI", "/home/guill/.npm-global/bin/openclaw")
 GATEWAY_SERVICE = os.environ.get("OPENCLAW_GATEWAY_SERVICE", "openclaw-gateway.service")
@@ -18,6 +19,12 @@ JOURNAL_SINCE = os.environ.get("WHATSAPP_WATCHDOG_JOURNAL_SINCE", "12 hours ago"
 STALE_SECONDS = int(os.environ.get("WHATSAPP_WATCHDOG_STALE_SECONDS", "180"))
 HEALTH_FAILURE_THRESHOLD = int(os.environ.get("WHATSAPP_WATCHDOG_HEALTH_FAILURE_THRESHOLD", "3"))
 WHATSAPP_STALE_THRESHOLD = int(os.environ.get("WHATSAPP_WATCHDOG_STALE_FAILURE_THRESHOLD", "2"))
+DISCONNECT_BURST_WINDOW_SECONDS = int(os.environ.get("WHATSAPP_WATCHDOG_DISCONNECT_BURST_WINDOW_SECONDS", "3600"))
+DISCONNECT_BURST_THRESHOLD = int(os.environ.get("WHATSAPP_WATCHDOG_DISCONNECT_BURST_THRESHOLD", "3"))
+DISCONNECT_DAILY_WINDOW_SECONDS = int(os.environ.get("WHATSAPP_WATCHDOG_DISCONNECT_DAILY_WINDOW_SECONDS", "86400"))
+DISCONNECT_DAILY_THRESHOLD = int(os.environ.get("WHATSAPP_WATCHDOG_DISCONNECT_DAILY_THRESHOLD", "8"))
+OUTBOX_STALE_SECONDS = int(os.environ.get("WHATSAPP_WATCHDOG_OUTBOX_STALE_SECONDS", "300"))
+OUTBOX_IMPACT_THRESHOLD = int(os.environ.get("WHATSAPP_WATCHDOG_OUTBOX_IMPACT_THRESHOLD", "1"))
 STATE_PATH = Path(
     os.environ.get(
         "WHATSAPP_WATCHDOG_STATE",
@@ -102,6 +109,12 @@ def gateway_health() -> dict:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
+def postgrest_json(path: str) -> list[dict] | dict:
+    url = POSTGREST_BASE_URL + (path if path.startswith("/") else "/" + path)
+    with urlopen(url, timeout=8) as response:
+        return json.loads(response.read(200000).decode("utf-8", "replace"))
+
+
 def journal_events() -> list[dict]:
     result = run(
         ["journalctl", "--user", "-u", GATEWAY_SERVICE, "--since", JOURNAL_SINCE, "--no-pager", "-o", "short-iso"],
@@ -132,6 +145,27 @@ def seconds_since(value: str | None) -> int | None:
         return None
 
 
+def parse_event_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def count_recent_disconnects(events: list[dict], window_seconds: int) -> int:
+    cutoff = utc_now().timestamp() - window_seconds
+    count = 0
+    for event in events:
+        if event.get("kind") != "disconnected":
+            continue
+        parsed = parse_event_time(event.get("at"))
+        if parsed and parsed.timestamp() >= cutoff:
+            count += 1
+    return count
+
+
 def seconds_since_epoch_ms(value: int | float | None) -> int | None:
     if value is None:
         return None
@@ -139,6 +173,62 @@ def seconds_since_epoch_ms(value: int | float | None) -> int | None:
         return int((utc_now().timestamp() * 1000 - float(value)) / 1000)
     except Exception:
         return None
+
+
+def outbox_impact() -> dict:
+    try:
+        rows = postgrest_json(
+            "/whatsapp_outbox"
+            "?select=id,status,created_at,last_attempt_at,error_message"
+            "&status=in.(PENDING,SENDING,ERROR)"
+            "&order=created_at.asc"
+            "&limit=200"
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "impacting": False,
+            "pending_count": None,
+            "sending_count": None,
+            "error_count": None,
+            "stale_count": None,
+        }
+
+    if not isinstance(rows, list):
+        rows = []
+
+    counts = {"PENDING": 0, "SENDING": 0, "ERROR": 0}
+    oldest_active_age = None
+    stale_rows: list[dict] = []
+    for row in rows:
+        status = str(row.get("status") or "").upper()
+        if status in counts:
+            counts[status] += 1
+        if status not in {"PENDING", "SENDING"}:
+            continue
+        created_age = seconds_since(row.get("created_at"))
+        attempt_age = seconds_since(row.get("last_attempt_at"))
+        age = attempt_age if status == "SENDING" and attempt_age is not None else created_age
+        if age is not None:
+            oldest_active_age = age if oldest_active_age is None else max(oldest_active_age, age)
+            if age >= OUTBOX_STALE_SECONDS:
+                stale_rows.append({"id": row.get("id"), "status": status, "age_seconds": age})
+
+    stale_count = len(stale_rows)
+    impacting = stale_count >= OUTBOX_IMPACT_THRESHOLD or counts["ERROR"] >= OUTBOX_IMPACT_THRESHOLD
+    return {
+        "ok": True,
+        "impacting": impacting,
+        "pending_count": counts["PENDING"],
+        "sending_count": counts["SENDING"],
+        "error_count": counts["ERROR"],
+        "stale_count": stale_count,
+        "oldest_active_age_seconds": oldest_active_age,
+        "stale_seconds": OUTBOX_STALE_SECONDS,
+        "impact_threshold": OUTBOX_IMPACT_THRESHOLD,
+        "sample_stale_rows": stale_rows[:5],
+    }
 
 
 def increment_counter(state: dict, key: str, failed: bool) -> int:
@@ -172,6 +262,7 @@ def main() -> int:
     state = read_state()
     service = run(["systemctl", "--user", "is-active", GATEWAY_SERVICE], timeout=8)
     health = gateway_health()
+    outbox = outbox_impact()
     events = journal_events()
     whatsapp_health = (health.get("json") or {}).get("channels", {}).get("whatsapp", {})
     health_connected = bool(whatsapp_health.get("connected") or whatsapp_health.get("linked"))
@@ -195,6 +286,13 @@ def main() -> int:
     disconnected_age = seconds_since(last_disconnect)
     connected_after_disconnect = bool(last_connected and last_disconnect and last_connected >= last_disconnect)
     connected = health_connected or (bool(last_connected) and (not last_disconnect or connected_after_disconnect))
+    recent_disconnect_count = count_recent_disconnects(events, DISCONNECT_BURST_WINDOW_SECONDS)
+    daily_disconnect_count = count_recent_disconnects(events, DISCONNECT_DAILY_WINDOW_SECONDS)
+    disconnect_burst_warning = (
+        recent_disconnect_count >= DISCONNECT_BURST_THRESHOLD
+        or daily_disconnect_count >= DISCONNECT_DAILY_THRESHOLD
+    )
+    message_impacting = bool(outbox.get("impacting"))
     health_failure_count = increment_counter(state, "gateway_health_failure_count", not health["ok"])
     whatsapp_stale_failure = bool(
         (
@@ -267,12 +365,28 @@ def main() -> int:
             "whatsapp_health_connected": health_connected,
             "seconds_since_health_activity": health_activity_age,
             "connected": connected,
-            "status": "connected" if connected else ("stale" if restart_reason else "unknown"),
+            "status": (
+                "impacted"
+                if connected and message_impacting
+                else "degraded"
+                if connected and disconnect_burst_warning
+                else ("connected" if connected else ("stale" if restart_reason else "unknown"))
+            ),
             "stale_seconds": STALE_SECONDS,
             "gateway_health_failure_threshold": HEALTH_FAILURE_THRESHOLD,
             "whatsapp_stale_failure_threshold": WHATSAPP_STALE_THRESHOLD,
             "seconds_since_disconnect": disconnected_age,
+            "disconnect_burst_warning": disconnect_burst_warning,
+            "disconnect_burst_window_seconds": DISCONNECT_BURST_WINDOW_SECONDS,
+            "disconnect_burst_threshold": DISCONNECT_BURST_THRESHOLD,
+            "disconnects_in_burst_window": recent_disconnect_count,
+            "disconnect_daily_window_seconds": DISCONNECT_DAILY_WINDOW_SECONDS,
+            "disconnect_daily_threshold": DISCONNECT_DAILY_THRESHOLD,
+            "disconnects_in_daily_window": daily_disconnect_count,
             "recent_event_count": len([e for e in events if e.get("kind") in {"connected", "disconnected"}]),
+            "postgrest_base_url": POSTGREST_BASE_URL,
+            "outbox": outbox,
+            "message_impacting": message_impacting,
         }
     )
     write_state(state)
