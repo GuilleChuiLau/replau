@@ -2,6 +2,8 @@
 
 Driver onboarding, verification, and nearby dispatch app for Replau.
 
+Operator and driver instructions live in [`DRIVER_APP_MANUAL.md`](DRIVER_APP_MANUAL.md).
+
 This package does not replace the existing dispatch module. It sits in front of it:
 
 - Applicants live in `api.driver_accounts`.
@@ -14,6 +16,7 @@ This package does not replace the existing dispatch module. It sits in front of 
 ```text
 add_driver_app_phase1.sql
 add_driver_app_phase2.sql
+DRIVER_APP_MANUAL.md
 replau_driver_app.py
 requirements.txt
 .env.example
