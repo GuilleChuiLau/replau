@@ -5,6 +5,7 @@ Adds:
 1. Web health dashboard on `http://127.0.0.1:8793`
 2. Daily PostgreSQL backup with systemd timer
 3. Stuck WhatsApp/email monitor with systemd timer
+4. WhatsApp gateway watchdog with systemd timer
 
 ## Install
 
@@ -18,7 +19,7 @@ chmod +x install_replau_ops.sh
 ```bash
 sudo systemctl status replau-health-dashboard --no-pager
 curl http://127.0.0.1:8793/health | jq
-systemctl list-timers replau-daily-backup.timer replau-stuck-monitor.timer --no-pager
+systemctl list-timers replau-daily-backup.timer replau-stuck-monitor.timer replau-whatsapp-watchdog.timer --no-pager
 ```
 
 Open:
@@ -60,6 +61,17 @@ sudo ls -lh /var/backups/replau-localapi
 sudo systemctl start replau-stuck-monitor.service || true
 journalctl -u replau-stuck-monitor.service -n 80 --no-pager
 ```
+
+## Run WhatsApp watchdog manually
+
+```bash
+sudo systemctl start replau-whatsapp-watchdog.service || true
+journalctl -u replau-whatsapp-watchdog.service -n 80 --no-pager
+```
+
+The watchdog reports `connected`, `degraded`, `impacted`, or `stale`.
+`degraded` means reconnect churn is present but messages are not stuck.
+`impacted` means the WhatsApp outbox has pending/sending/error rows that need attention.
 
 ## Restore test example
 

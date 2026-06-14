@@ -21,11 +21,15 @@ sudo cp replau-daily-backup.service /etc/systemd/system/
 sudo cp replau-daily-backup.timer /etc/systemd/system/
 sudo cp replau-stuck-monitor.service /etc/systemd/system/
 sudo cp replau-stuck-monitor.timer /etc/systemd/system/
+sudo cp replau-whatsapp-watchdog.service /etc/systemd/system/
+sudo cp replau-whatsapp-watchdog.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable replau-health-dashboard
 sudo systemctl enable replau-daily-backup.timer
 sudo systemctl enable replau-stuck-monitor.timer
+sudo systemctl enable replau-whatsapp-watchdog.timer
 sudo systemctl restart replau-health-dashboard
 sudo systemctl start replau-daily-backup.timer
 sudo systemctl start replau-stuck-monitor.timer
+sudo systemctl start replau-whatsapp-watchdog.timer
 echo "Installed. Dashboard: http://127.0.0.1:8793"
