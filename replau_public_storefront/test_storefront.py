@@ -17,7 +17,7 @@ def main() -> None:
     assert ".join('\\n')" in page
     assert "Buscar hamburguesas" in page
     assert "object-fit:contain" in page
-    assert ".photo{height:270px" in page
+    assert ".photo{height:210px" in page
     print(f"STOREFRONT_MENU_OK: {len(items)} sellable products")
 
 
