@@ -152,7 +152,7 @@ def storefront() -> HTMLResponse:
     .categories{{display:flex;gap:8px;overflow:auto;padding-bottom:4px}} .category{{white-space:nowrap;border:1px solid var(--line);border-radius:999px;background:#fff;padding:11px 14px;font-weight:800;cursor:pointer}} .category.active{{background:var(--ink);color:#fff;border-color:var(--ink)}}
     .layout{{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px;align-items:start}} .menu{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}
     .product,.cart{{background:var(--card);border:1px solid var(--line);border-radius:22px;box-shadow:0 10px 30px rgba(78,40,18,.08)}} .product{{overflow:hidden;display:flex;flex-direction:column;min-height:395px}}
-    .photo{{height:210px;padding:8px;background:#fff8ed;display:grid;place-items:center;font-size:60px;overflow:hidden}} .photo img{{width:100%;height:100%;object-fit:contain;object-position:center}}
+    .photo{{width:100%;aspect-ratio:4/3;padding:8px;background:#fff8ed;display:grid;place-items:center;font-size:60px;overflow:hidden}} .photo img{{display:block;width:100%;height:100%;object-fit:contain;object-position:center}}
     .product-body{{padding:18px;display:flex;flex:1;flex-direction:column}} .product h3{{font-size:19px;margin:5px 0 8px}} .code{{font-size:11px;color:var(--muted);letter-spacing:.06em}} .description{{color:var(--muted);font-size:14px;line-height:1.45;margin:0 0 14px}} .price{{font-size:23px;font-weight:900;margin:auto 0 14px}}
     .category-label{{font-size:11px;color:var(--brand2);font-weight:900;text-transform:uppercase;letter-spacing:.05em}}
     button.add{{width:100%;border:0;border-radius:12px;background:var(--brand);color:#fff;padding:11px;font-weight:850;cursor:pointer}} button.add:hover{{background:var(--brand2)}}
@@ -163,7 +163,7 @@ def storefront() -> HTMLResponse:
     .whatsapp{{display:block;width:100%;border:0;border-radius:14px;background:var(--green);color:#fff;padding:14px;font-weight:900;font-size:16px;cursor:pointer;text-align:center}}
     .notice{{font-size:12px;color:var(--muted);line-height:1.45;margin:12px 0 0}} footer{{text-align:center;color:var(--muted);padding:40px 20px}}
     @media(max-width:850px){{.layout{{display:block}}.menu{{grid-template-columns:repeat(2,minmax(0,1fr))}}.cart{{position:fixed;inset:auto 0 0;top:auto;z-index:10;border-radius:22px 22px 0 0;max-height:78vh;overflow:auto;transform:translateY(calc(100% - 64px));transition:.25s}}.cart.open{{transform:none}}.cart h2{{cursor:pointer}}body.cart-open{{overflow:hidden}}}}
-    @media(max-width:520px){{.menu{{grid-template-columns:1fr}}.hero{{padding-top:22px}}.photo{{height:230px}}.product{{min-height:420px}}}}
+    @media(max-width:700px){{.menu{{grid-template-columns:1fr}}.hero{{padding-top:22px}}.photo{{aspect-ratio:1/1}}.product{{min-height:420px}}}}
   </style>
 </head>
 <body>
