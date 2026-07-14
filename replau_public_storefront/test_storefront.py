@@ -16,6 +16,8 @@ def main() -> None:
     page = storefront().body.decode("utf-8")
     assert ".join('\\n')" in page
     assert "Buscar hamburguesas" in page
+    assert "object-fit:contain" in page
+    assert ".photo{height:270px" in page
     print(f"STOREFRONT_MENU_OK: {len(items)} sellable products")
 
 
