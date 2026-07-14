@@ -11,6 +11,16 @@ catalog code. Product images uploaded through Product Admin appear
 automatically through the storefront's restricted image proxy; until an image
 is uploaded, a category-specific icon is shown.
 
+The generated food-styling set is stored under `assets/products/`. Restore or
+refresh all Product Admin images with:
+
+```bash
+./install_generated_product_images.sh
+```
+
+The installer reads the local Product Admin token without printing or copying
+it into the repository.
+
 ## Public boundary
 
 Only the storefront, token-protected `/track/*`, and the tracking route API are
