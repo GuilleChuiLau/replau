@@ -5,6 +5,12 @@ Customer-facing menu and cart for `orders.replau.com`. It reads active
 browser, and opens WhatsApp with the exact multiline format accepted by the
 Replau bridge.
 
+The storefront groups products into customer-facing categories, supports
+category filters and text search, and generates short descriptions from the
+catalog code. Product images uploaded through Product Admin appear
+automatically through the storefront's restricted image proxy; until an image
+is uploaded, a category-specific icon is shown.
+
 ## Public boundary
 
 Only the storefront, token-protected `/track/*`, and the tracking route API are
