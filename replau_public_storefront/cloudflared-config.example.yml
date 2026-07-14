@@ -1,0 +1,17 @@
+# Copy to ~/.cloudflared/config.yml after running:
+#   cloudflared tunnel login
+#   cloudflared tunnel create replau-storefront
+# Never commit cert.pem or the generated tunnel credentials JSON.
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: /home/USER/.cloudflared/REPLACE_WITH_TUNNEL_UUID.json
+
+ingress:
+  - hostname: orders.replau.com
+    path: ^/track/.*$
+    service: http://127.0.0.1:8790
+  - hostname: orders.replau.com
+    path: ^/api/route/.*$
+    service: http://127.0.0.1:8790
+  - hostname: orders.replau.com
+    service: http://127.0.0.1:8796
+  - service: http_status:404

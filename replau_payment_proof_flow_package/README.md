@@ -2,6 +2,20 @@
 
 This package adds Yape/Plin payment proof support to the Replau WhatsApp order system.
 
+## OCR-assisted review
+
+The review page can run local RapidOCR against a saved image and display the
+amount, recipient, operation/reference number, date/time, OCR confidence,
+duplicate-operation warnings, and comparison with the order total. Set
+`PAYMENT_EXPECTED_RECIPIENTS` in the service environment to a comma-separated
+list of valid recipient names or identifying fragments to enable recipient
+matching.
+
+OCR is advisory only. It must not automatically approve a payment because a
+screenshot can be edited or reused and does not prove settlement. Keep manual
+review enabled unless the transaction is reconciled with an authoritative bank
+or payment-provider source.
+
 ## What it adds
 
 - `api.pedido_payment_proofs` table

@@ -116,6 +116,11 @@ def cmd(args,timeout=6):
         return {"ok":False,"stdout":"","stderr":f"{type(e).__name__}: {e}","returncode":None}
 def svc(name):
     a=cmd(["systemctl","is-active",name]); e=cmd(["systemctl","is-enabled",name])
+    if a["stdout"] != "active":
+        user_a=cmd(["systemctl","--user","is-active",name])
+        user_e=cmd(["systemctl","--user","is-enabled",name])
+        if user_a["stdout"] == "active" or user_e["stdout"] not in ("", "not-found", "disabled"):
+            a, e = user_a, user_e
     return {"service":name,"active":a["stdout"] or "unknown","enabled":e["stdout"] or "unknown","ok":a["stdout"]=="active"}
 def tcp(host,port):
     try:

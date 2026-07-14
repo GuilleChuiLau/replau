@@ -12,6 +12,8 @@ import requests
 from fastapi import FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
+from payment_proof_ocr import PaymentProofOCR
+
 POSTGREST_BASE_URL = os.environ.get("POSTGREST_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
 APP_HOST = os.environ.get("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.environ.get("APP_PORT", "8795"))
@@ -21,6 +23,7 @@ REVIEW_TOKEN = os.environ.get("REVIEW_TOKEN", "").strip()
 PAYMENT_RECEIPT_DIR = Path(os.environ.get("PAYMENT_RECEIPT_DIR", "/home/guill/.openclaw/workspace/replau_payment_receipts")).resolve()
 
 app = FastAPI(title="Replau Payment Proof Review", version="1.0.0")
+ocr = PaymentProofOCR()
 
 
 def esc(v: Any) -> str:
@@ -150,7 +153,20 @@ def layout(title: str, body: str, flash: str = "", auth_query: str = "") -> HTML
     .kpi strong {{ display:block; margin-top:8px; font-size:26px; line-height:1; }}
     .quick-actions {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }}
     .quick-actions a {{ display:inline-block; padding:9px 12px; border-radius:12px; background:#334155; color:#e5e7eb; font-weight:bold; }}
+    .warning {{ background:#451a03; border:1px solid #d97706; padding:10px; border-radius:10px; margin:8px 0; }}
+    .ok {{ color:#86efac; }}
+    .ocr-summary {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:14px 0; }}
+    .ocr-item {{ background:#0b1220; border:1px solid #334155; border-radius:12px; padding:12px; }}
+    .ocr-item span {{ display:block; color:#94a3b8; font-size:12px; font-weight:bold; text-transform:uppercase; letter-spacing:.04em; }}
+    .ocr-item strong {{ display:block; margin-top:6px; overflow-wrap:anywhere; }}
+    .check {{ display:flex; justify-content:space-between; gap:12px; padding:10px 0; border-bottom:1px solid #334155; }}
+    .check:last-child {{ border-bottom:0; }}
+    .check-pass {{ color:#86efac; }} .check-fail {{ color:#fca5a5; }} .check-unknown {{ color:#fcd34d; }}
+    .decision {{ border:2px solid #475569; }}
+    .decision.review {{ border-color:#d97706; }}
+    .decision.clear {{ border-color:#16a34a; }}
     @media(max-width:900px) {{ .grid,.kpi-grid {{ grid-template-columns:1fr; }} }}
+    @media(max-width:900px) {{ .ocr-summary {{ grid-template-columns:1fr; }} }}
   </style>
 </head>
 <body>
@@ -246,6 +262,49 @@ def money(value: Any) -> str:
         return f"S/ {float(value or 0):,.2f}"
     except Exception:
         return "S/ 0.00"
+
+
+def check_row(label: str, value: Any, pass_text: str, fail_text: str, unknown_text: str) -> str:
+    if value is True:
+        css, text = "check-pass", pass_text
+    elif value is False:
+        css, text = "check-fail", fail_text
+    else:
+        css, text = "check-unknown", unknown_text
+    return f'<div class="check"><strong>{esc(label)}</strong><strong class="{css}">{esc(text)}</strong></div>'
+
+
+def render_ocr_result(result: Dict[str, Any], order_total: Any) -> str:
+    fields = result.get("fields") or {}
+    checks = result.get("checks") or {}
+    warnings = result.get("warnings") or []
+    has_warning = bool(warnings)
+    recommendation = "REVISAR O RECHAZAR" if has_warning else "APTO PARA REVISIÓN MANUAL"
+    decision_css = "review" if has_warning else "clear"
+    return f"""
+      <div class="card decision {decision_css}">
+        <h3>Resultado OCR: {esc(recommendation)}</h3>
+        <p class="muted">Use estos resultados junto con la imagen original. El OCR orienta la decisión, pero no confirma que el dinero haya sido abonado.</p>
+      </div>
+      <div class="ocr-summary">
+        <div class="ocr-item"><span>Proveedor</span><strong>{esc(fields.get('provider') or 'No detectado')}</strong></div>
+        <div class="ocr-item"><span>Monto detectado</span><strong>{money(fields.get('amount'))}</strong></div>
+        <div class="ocr-item"><span>Total del pedido</span><strong>{money(order_total)}</strong></div>
+        <div class="ocr-item"><span>Destinatario</span><strong>{esc(fields.get('recipient') or 'No detectado')}</strong></div>
+        <div class="ocr-item"><span>Número de operación</span><strong>{esc(fields.get('operation_number') or 'No detectado')}</strong></div>
+        <div class="ocr-item"><span>Fecha y hora</span><strong>{esc(fields.get('timestamp_text') or 'No detectada')}</strong></div>
+        <div class="ocr-item"><span>Confianza OCR</span><strong>{float(result.get('ocr_confidence') or 0) * 100:.1f}%</strong></div>
+        <div class="ocr-item"><span>Texto de pago exitoso</span><strong>{'Detectado' if fields.get('success_text_detected') else 'No detectado'}</strong></div>
+        <div class="ocr-item"><span>Motor</span><strong>{esc(result.get('engine') or 'No disponible')}</strong></div>
+      </div>
+      <h3>Validaciones</h3>
+      {check_row('Monto', checks.get('amount_match'), 'COINCIDE', 'NO COINCIDE', 'NO SE PUDO VALIDAR')}
+      {check_row('Destinatario', checks.get('recipient_match'), 'COINCIDE', 'NO COINCIDE', 'NOMBRES NO CONFIGURADOS')}
+      {check_row('Operación única', None if checks.get('duplicate_operation') is None else not checks.get('duplicate_operation'), 'NO DUPLICADA', 'DUPLICADA — REVISAR', 'NO SE PUDO VALIDAR')}
+      <h3>Alertas</h3>
+      {''.join(f'<div class="warning">{esc(w)}</div>' for w in warnings) or '<p class="ok"><strong>Sin alertas de consistencia.</strong></p>'}
+      <p class="muted"><strong>Decisión humana obligatoria:</strong> compare el comprobante, el pedido y estas validaciones antes de aprobar o rechazar.</p>
+    """
 
 
 @app.get("/health")
@@ -366,6 +425,13 @@ def proof_detail(proof_id: int, request: Request, flash: str = "", x_review_toke
     if not rows:
         raise HTTPException(status_code=404, detail="Proof not found")
     r = rows[0]
+    ocr_html = '<div class="warning">No hay un archivo local disponible para analizar.</div>'
+    if r.get("local_path"):
+        try:
+            result = ocr.analyze(local_proof_path(r), r.get("total"))
+            ocr_html = render_ocr_result(result, r.get("total"))
+        except Exception as exc:
+            ocr_html = f'<div class="warning">OCR failed: {esc(type(exc).__name__)}: {esc(exc)}</div>'
     body = f"""
     <div class="grid">
       <div class="card">
@@ -386,7 +452,12 @@ def proof_detail(proof_id: int, request: Request, flash: str = "", x_review_toke
       </div>
     </div>
     <div class="card">
-      <h2>Review</h2>
+      <h2>Resultados del análisis OCR</h2>
+      {ocr_html}
+      <div class="quick-actions"><a href="{esc(with_token(f'/proof/{proof_id}?ocr=1', request))}">Actualizar análisis OCR</a></div>
+    </div>
+    <div class="card">
+      <h2>Decisión del cajero</h2>
       <form method="post" action="/proof/{proof_id}/review{token_query(request)}">
         <label>Reviewed by</label>
         <input name="verified_by" value="logistica">
@@ -395,8 +466,8 @@ def proof_detail(proof_id: int, request: Request, flash: str = "", x_review_toke
         <label>Notify customer by WhatsApp?</label>
         <select name="notify"><option value="true">Yes</option><option value="false">No</option></select>
         <br><br>
-        <button class="good" name="status" value="VERIFIED" type="submit">Verify payment</button>
-        <button class="bad" name="status" value="REJECTED" type="submit">Reject proof</button>
+        <button class="good" name="status" value="VERIFIED" type="submit" onclick="return confirm('¿Aprobar este pago después de revisar el comprobante y los resultados OCR?')">Aprobar pago</button>
+        <button class="bad" name="status" value="REJECTED" type="submit" onclick="return confirm('¿Rechazar este comprobante?')">Rechazar comprobante</button>
         <button class="secondary" name="status" value="CANCELLED" type="submit">Cancel proof</button>
       </form>
     </div>

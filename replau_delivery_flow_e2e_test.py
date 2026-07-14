@@ -215,9 +215,11 @@ def render_checks() -> None:
     if not r.ok:
         fail("delivery station render", f"HTTP {r.status_code}: {r.text[:600]}")
     text = r.text
-    needles = ["Delivery Station", "Dispatch Board", "Sin repartidor", "Asignar directo", "Control de repartidores", "Ofrecer repartidor"]
-    if "Sin pedidos para delivery" not in text:
-        needles.append("Clear")
+    needles = ["Delivery Station", "Dispatch Board", "Sin repartidor", "Control de repartidores"]
+    if "Sin pedidos para delivery" in text:
+        needles.append("Sin pedidos para delivery")
+    else:
+        needles.extend(["Asignar directo", "Ofrecer repartidor", "Clear"])
     for needle in needles:
         if needle not in text:
             fail("delivery station render", f"missing {needle}")

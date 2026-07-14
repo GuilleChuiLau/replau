@@ -1,0 +1,17 @@
+[Unit]
+Description=Replau Public Storefront
+After=postgrest-localapi.service
+Requires=postgrest-localapi.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/guill/.openclaw/workspace/replau/replau_public_storefront
+EnvironmentFile=/home/guill/.config/replau/storefront.env
+ExecStart=/home/guill/.local/share/replau/services/product-venv/bin/python public_storefront.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

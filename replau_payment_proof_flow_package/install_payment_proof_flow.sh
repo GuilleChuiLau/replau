@@ -13,7 +13,7 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 -d localapi < add_payment_proof_flow.sq
 echo "2) Installing review UI into $APP_DIR..."
 sudo mkdir -p "$APP_DIR"
 sudo chown -R "$USER:$USER" "$APP_DIR"
-cp replau_payment_proof_review.py requirements.txt replau-payment-proof-review.service test_payment_proof_flow.sh "$APP_DIR/"
+cp replau_payment_proof_review.py payment_proof_ocr.py requirements.txt replau-payment-proof-review.service test_payment_proof_flow.sh "$APP_DIR/"
 
 cd "$APP_DIR"
 python3 -m venv .venv
