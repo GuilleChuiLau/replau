@@ -1,15 +1,23 @@
 # Replau Public Storefront
 
-Customer-facing menu and cart for `orders.replau.com`. It reads active
-`TERMINADO` products and prices from local PostgREST, builds a cart in the
-browser, and opens WhatsApp with the exact multiline format accepted by the
-Replau bridge.
+Customer-facing menu and online checkout for `orders.replau.com`. It reads
+active `TERMINADO` products and prices from local PostgREST, validates and
+reprices the cart on the server, and creates the order through Replau's
+transactional order function. Customers receive an order number, a safe
+tracking link, and an optional WhatsApp contact link immediately.
 
 The storefront groups products into customer-facing categories, supports
 category filters and text search, and generates short descriptions from the
 catalog code. Product images uploaded through Product Admin appear
 automatically through the storefront's restricted image proxy; until an image
 is uploaded, a category-specific icon is shown.
+
+Checkout supports delivery or restaurant pickup, four payment methods,
+customer notes, optional browser geolocation, duplicate-submit protection, a
+honeypot, IP throttling, and the shared restaurant open/paused status. Catalog
+IDs, availability, units, and prices are always revalidated server-side. Set
+`DEFAULT_DELIVERY` in the private storefront environment; the browser cannot
+choose or override that fee.
 
 The generated food-styling set is stored under `assets/products/`. Restore or
 refresh all Product Admin images with:
@@ -76,5 +84,6 @@ python3 test_storefront.py
 curl https://orders.replau.com/health
 ```
 
-A generated WhatsApp message must contain the customer name on the first line
-and one `quantity + product name` item per following line.
+The test checks catalog rendering, the checkout form, server-side cart
+normalization, and customer-safe tracking-link generation without creating a
+live order.
