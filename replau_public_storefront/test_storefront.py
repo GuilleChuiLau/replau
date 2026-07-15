@@ -25,7 +25,13 @@ def main() -> None:
     assert "@media(max-width:700px)" in page
     assert "Finalizar pedido" in page
     assert "fetch('/api/checkout'" in page
-    assert "Usar mi ubicación actual" in page
+    assert "Agregar mi ubicación actual" in page
+    assert "mobile-cart-summary" in page
+    assert "100dvh" in page
+    assert "Progreso del checkout" in page
+    assert "Resumen del pedido" in page
+    assert "Agregar al carrito" in page
+    assert "Tu antojo, a unos cuantos clics." in page
     assert "Continuar en WhatsApp" not in page
     assert safe_tracking_url("https://orders.replau.com/order/token") == "https://orders.replau.com/track/token"
     first = items[0]
