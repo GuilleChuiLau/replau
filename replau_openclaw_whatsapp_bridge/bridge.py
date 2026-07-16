@@ -1447,12 +1447,18 @@ def is_menu_request(text: Optional[str]) -> bool:
     return bool(re.search(r"\b(?:menu|carta|catalogo|cat[aá]logo|lista|precios|price\s*list)\b", normalized))
 
 
+def is_web_order_handoff(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    return normalize_loose_text(str(text).splitlines()[0]).startswith("pedido web confirmado")
+
+
 def menu_reply_text() -> str:
     if MENU_URL:
         return (
-            "Claro ✅ Puedes descargar el menú aquí:\n"
+            "🍔 Mira el menú completo de Replau Burger aquí:\n"
             f"{MENU_URL}\n\n"
-            "Cuando estés listo, envíame tu nombre y los productos que deseas pedir."
+            "Cuando elijas, envíame tu nombre y los productos que deseas pedir."
         )
     return (
         "Sí, puedo enviarte el menú, pero todavía no tengo configurado el enlace de descarga.\n\n"
@@ -2699,6 +2705,53 @@ def confirmed_order_summary_text(conversation: Dict[str, Any]) -> Optional[str]:
 
 
 def handle_confirmed(inbound: NormalizedWebhook, conversation: Dict[str, Any]) -> Dict[str, Any]:
+    if is_payment_receipt_media(inbound):
+        draft = dict(conversation.get("pedido_borrador") or {})
+        pedido_id = conversation.get("pedido_id") or draft.get("pedido_id")
+        if not pedido_id:
+            text = (
+                "Recibí la imagen, pero no pude relacionarla con un pedido confirmado. "
+                "Envíame el número del pedido para que el equipo pueda revisarlo."
+            )
+            log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", text)
+            return reply(text, next_state="CONFIRMED", receipt_saved=False)
+        try:
+            receipt = save_payment_receipt(inbound, draft)
+            proof_result = register_payment_proof_for_receipt(inbound, receipt, int(pedido_id))
+        except Exception as exc:
+            logging.warning("Could not save/register web-order payment proof pedido_id=%s: %s", pedido_id, exc)
+            text = (
+                "Recibí el comprobante, pero no pude guardarlo. "
+                "Por favor envíalo nuevamente como imagen JPG/PNG o PDF."
+            )
+            patch_conversation(inbound.whatsapp_number, {"last_outbound_text": text})
+            log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", text)
+            return reply(text, next_state="CONFIRMED", receipt_saved=False)
+        draft["payment_receipt"] = receipt
+        draft.setdefault("payment_receipts", []).append(receipt)
+        draft["payment_proof_result"] = proof_result
+        text = proof_result.get("whatsapp_reply_text") or (
+            "Recibí tu comprobante de pago ✅\n\n"
+            "Lo enviaremos a revisión. Te avisaremos cuando sea verificado."
+        )
+        patch_conversation(
+            inbound.whatsapp_number,
+            {"estado": "CONFIRMED", "pedido_borrador": draft, "last_outbound_text": text},
+        )
+        log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", text)
+        return reply(
+            text,
+            next_state="CONFIRMED",
+            receipt_saved=True,
+            payment_proof=proof_result,
+        )
+    if inbound.message_type == "text" and is_web_order_handoff(inbound.message_text):
+        text = confirmed_order_summary_text(conversation) or "Recibí los datos de tu pedido web ✅"
+        if "Yape" in inbound.message_text or "Plin" in inbound.message_text or "Transferencia" in inbound.message_text:
+            text += "\n\nAhora envía aquí la foto de tu comprobante de pago."
+        patch_conversation(inbound.whatsapp_number, {"last_outbound_text": text})
+        log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", text)
+        return reply(text, next_state="CONFIRMED", web_order_handoff=True)
     if inbound.message_type == "text" and inbound.message_text and len(inbound.message_text.splitlines()) >= 2:
         patch_conversation(inbound.whatsapp_number, {"estado": "ASKING_NAME_AND_ITEMS"})
         return handle_new_or_asking(inbound, conversation)

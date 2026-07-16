@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
 from starlette.requests import Request
@@ -51,6 +52,13 @@ def main() -> None:
     body = json.loads(response.body)
     assert response.status_code == 201 and body["ok"] and body["order_number"] == "PED-TEST"
     assert body["tracking_url"] == "https://orders.replau.com/track/test-token"
+    handoff = parse_qs(urlparse(body["whatsapp_url"]).query)["text"][0]
+    assert "PEDIDO WEB CONFIRMADO: PED-TEST" in handoff
+    assert "Nombre: Cliente prueba" in handoff
+    assert f"- 2 x {first['name']}" in handoff
+    assert "Dirección: Recojo en restaurante" in handoff
+    assert "Pago: Contra entrega" in handoff
+    assert "Seguimiento: https://orders.replau.com/track/test-token" in handoff
     sent = create_order.call_args.args[1]
     assert sent["p_items"] == normalized and all("precio_unitario" not in item for item in sent["p_items"])
     print(f"STOREFRONT_MENU_OK: {len(items)} sellable products")

@@ -114,6 +114,43 @@ def checkout_items(payload: CheckoutRequest) -> list[dict[str, Any]]:
     ]
 
 
+def web_order_whatsapp_message(
+    payload: CheckoutRequest,
+    items: list[dict[str, Any]],
+    order_number: Any,
+    total: Any,
+    tracking_url: str,
+) -> str:
+    payment_labels = {
+        "YAPE": "Yape",
+        "PLIN": "Plin",
+        "TRANSFERENCIA": "Transferencia",
+        "CONTRA_ENTREGA": "Contra entrega",
+    }
+    lines = [
+        f"PEDIDO WEB CONFIRMADO: {order_number or ''}",
+        f"Nombre: {payload.customer_name.strip()}",
+        "Productos:",
+    ]
+    lines.extend(f"- {item['cantidad']} x {item['producto_texto']}" for item in items)
+    lines.extend(
+        [
+            f"Total: S/ {float(total or 0):.2f}",
+            f"Entrega: {'Delivery' if payload.fulfillment == 'DELIVERY' else 'Recojo en restaurante'}",
+            f"Dirección: {payload.address.strip() if payload.fulfillment == 'DELIVERY' else 'Recojo en restaurante'}",
+        ]
+    )
+    if payload.fulfillment == "DELIVERY" and payload.latitude is not None and payload.longitude is not None:
+        lines.append(f"Ubicación: https://www.google.com/maps?q={payload.latitude},{payload.longitude}")
+    lines.append(f"Pago: {payment_labels.get(payload.payment_method, payload.payment_method)}")
+    if payload.notes.strip():
+        lines.append(f"Notas: {payload.notes.strip()}")
+    if tracking_url:
+        lines.append(f"Seguimiento: {tracking_url}")
+    lines.append("Enviado desde orders.replau.com")
+    return "\n".join(lines)
+
+
 def safe_tracking_url(order_url: Any) -> str:
     value = str(order_url or "")
     if "/order/" not in value:
@@ -251,7 +288,9 @@ def api_checkout(payload: CheckoutRequest, request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
     except requests.RequestException:
         return JSONResponse({"ok": False, "error": "No pudimos registrar el pedido. Inténtalo nuevamente."}, status_code=502)
-    response = {"ok": True, "order_number": result.get("pedido_num"), "total": result.get("total"), "payment_method": result.get("payment_method"), "tracking_url": safe_tracking_url(result.get("order_url")), "whatsapp_url": f"https://wa.me/{WHATSAPP_NUMBER}?text={quote('Hola, acabo de crear el pedido ' + str(result.get('pedido_num') or '') + '.', safe='')}"}
+    tracking_url = safe_tracking_url(result.get("order_url"))
+    whatsapp_message = web_order_whatsapp_message(payload, items, result.get("pedido_num"), result.get("total"), tracking_url)
+    response = {"ok": True, "order_number": result.get("pedido_num"), "total": result.get("total"), "payment_method": result.get("payment_method"), "tracking_url": tracking_url, "whatsapp_url": f"https://wa.me/{WHATSAPP_NUMBER}?text={quote(whatsapp_message, safe='')}"}
     with _checkout_lock:
         _checkout_results[payload.idempotency_key] = (time.monotonic(), response)
     return JSONResponse(response, status_code=201)
@@ -359,7 +398,7 @@ function setFulfillment(value){{fulfillment=value;document.getElementById('deliv
 function showError(message){{const el=document.getElementById('checkoutError');el.textContent=message;el.style.display='block';el.scrollIntoView({{behavior:'smooth',block:'nearest'}})}}
 function useLocation(){{if(!navigator.geolocation){{showError('Tu navegador no permite obtener la ubicación.');return}}const button=document.getElementById('locationButton');button.textContent='Obteniendo ubicación…';navigator.geolocation.getCurrentPosition(position=>{{coords={{latitude:position.coords.latitude,longitude:position.coords.longitude}};button.textContent='✅ Ubicación agregada'}},()=>{{button.textContent='📍 Agregar mi ubicación actual';showError('No pudimos obtener tu ubicación. Puedes continuar escribiendo la dirección.')}},{{enableHighAccuracy:true,timeout:10000,maximumAge:60000}})}}
 function newKey(){{return (crypto.randomUUID?crypto.randomUUID():`${{Date.now()}}-${{Math.random()}}`)+'-'+Date.now()}}
-async function placeOrder(){{if(submitting)return;const name=document.getElementById('checkoutName').value.trim(),phone=document.getElementById('checkoutPhone').value.trim(),address=document.getElementById('checkoutAddress').value.trim();if(name.length<2){{showError('Escribe tu nombre.');return}}if(phone.replace(/\\D/g,'').length<9){{showError('Ingresa un número de WhatsApp válido.');return}}if(fulfillment==='DELIVERY'&&address.length<8){{showError('Ingresa tu dirección completa.');return}}submitting=true;const button=document.getElementById('placeOrder');button.disabled=true;button.textContent='Creando pedido…';document.getElementById('checkoutError').style.display='none';let key=sessionStorage.getItem('replau-checkout-key');if(!key){{key=newKey();sessionStorage.setItem('replau-checkout-key',key)}}try{{const response=await fetch('/api/checkout',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{customer_name:name,phone,fulfillment,address,latitude:coords.latitude,longitude:coords.longitude,payment_method:document.getElementById('checkoutPayment').value,notes:document.getElementById('checkoutNotes').value.trim(),idempotency_key:key,website:document.getElementById('checkoutWebsite').value,items:selected().map(i=>({{product_id:i.id,quantity:i.qty}}))}})}});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'No pudimos crear el pedido.');cart={{}};save();sessionStorage.removeItem('replau-checkout-key');document.getElementById('checkoutForm').hidden=true;const success=document.getElementById('checkoutSuccess');success.hidden=false;success.innerHTML=`<div class="check">✅</div><h2>Pedido ${{escapeHtml(data.order_number)}} confirmado</h2><p>Total: <strong>${{money(Number(data.total||0))}}</strong></p>${{data.tracking_url?`<a href="${{escapeHtml(data.tracking_url)}}">Seguir mi pedido</a>`:''}}<a class="secondary" href="${{escapeHtml(data.whatsapp_url)}}">Contactar por WhatsApp</a>`}}catch(error){{showError(error.message);submitting=false;button.disabled=false;button.textContent='Crear pedido'}}}}
+async function placeOrder(){{if(submitting)return;const name=document.getElementById('checkoutName').value.trim(),phone=document.getElementById('checkoutPhone').value.trim(),address=document.getElementById('checkoutAddress').value.trim();if(name.length<2){{showError('Escribe tu nombre.');return}}if(phone.replace(/\\D/g,'').length<9){{showError('Ingresa un número de WhatsApp válido.');return}}if(fulfillment==='DELIVERY'&&address.length<8){{showError('Ingresa tu dirección completa.');return}}submitting=true;const button=document.getElementById('placeOrder');button.disabled=true;button.textContent='Creando pedido…';document.getElementById('checkoutError').style.display='none';let key=sessionStorage.getItem('replau-checkout-key');if(!key){{key=newKey();sessionStorage.setItem('replau-checkout-key',key)}}try{{const response=await fetch('/api/checkout',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{customer_name:name,phone,fulfillment,address,latitude:coords.latitude,longitude:coords.longitude,payment_method:document.getElementById('checkoutPayment').value,notes:document.getElementById('checkoutNotes').value.trim(),idempotency_key:key,website:document.getElementById('checkoutWebsite').value,items:selected().map(i=>({{product_id:i.id,quantity:i.qty}}))}})}});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'No pudimos crear el pedido.');cart={{}};save();sessionStorage.removeItem('replau-checkout-key');document.getElementById('checkoutForm').hidden=true;const success=document.getElementById('checkoutSuccess');success.hidden=false;success.innerHTML=`<div class="check">✅</div><h2>Pedido ${{escapeHtml(data.order_number)}} confirmado</h2><p>Total: <strong>${{money(Number(data.total||0))}}</strong></p>${{data.tracking_url?`<a href="${{escapeHtml(data.tracking_url)}}">Seguir mi pedido</a>`:''}}<a class="secondary" href="${{escapeHtml(data.whatsapp_url)}}">Enviar datos del pedido por WhatsApp</a>`}}catch(error){{showError(error.message);submitting=false;button.disabled=false;button.textContent='Crear pedido'}}}}
 document.addEventListener('keydown',event=>{{if(event.key==='Escape')closeCheckout()}});document.getElementById('checkoutModal').addEventListener('click',event=>{{if(event.target.id==='checkoutModal')closeCheckout()}});renderCategories();renderMenu();renderCart();
 </script>
 </body></html>""", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY"})
