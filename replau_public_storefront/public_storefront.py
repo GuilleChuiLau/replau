@@ -2,18 +2,21 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
+import logging
 import os
 import re
 import threading
 import time
+import uuid
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import requests
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from pydantic import BaseModel, Field
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
@@ -29,6 +32,14 @@ DEFAULT_DELIVERY = max(0.0, float(os.environ.get("DEFAULT_DELIVERY", "0")))
 RESTAURANT_STATUS_PATH = Path(os.environ.get("REPLAU_RESTAURANT_STATUS_PATH", "/home/guill/.openclaw/workspace/replau_restaurant_status.json"))
 CHECKOUT_RATE_LIMIT = max(1, int(os.environ.get("CHECKOUT_RATE_LIMIT", "8")))
 CHECKOUT_RATE_WINDOW = max(60, int(os.environ.get("CHECKOUT_RATE_WINDOW", "900")))
+PAYMENT_RECEIPT_DIR = Path(os.environ.get("PAYMENT_RECEIPT_DIR", "/home/guill/.openclaw/workspace/replau_payment_receipts")).resolve()
+PAYMENT_PROOF_MAX_BYTES = max(1024, int(os.environ.get("PAYMENT_PROOF_MAX_BYTES", str(8 * 1024 * 1024))))
+PAYMENT_PROOF_TYPES = {
+    "image/jpeg": (".jpg", "image"),
+    "image/png": (".png", "image"),
+    "image/webp": (".webp", "image"),
+    "application/pdf": (".pdf", "document"),
+}
 
 app = FastAPI(title="Replau Public Storefront", docs_url=None, redoc_url=None, openapi_url=None)
 _checkout_lock = threading.Lock()
@@ -156,6 +167,25 @@ def safe_tracking_url(order_url: Any) -> str:
     if "/order/" not in value:
         return ""
     return value.replace("/order/", "/track/")
+
+
+def public_order(pedido_num: str, token: str) -> dict[str, Any]:
+    data = pg_post("/rpc/obtener_pedido_publico", {"p_pedido_num": pedido_num.strip(), "p_token": token.strip()})
+    if not isinstance(data, dict) or not data.get("ok"):
+        raise ValueError("El enlace del pedido es inválido o venció.")
+    return data
+
+
+def proof_file_signature_ok(content_type: str, first_chunk: bytes) -> bool:
+    if content_type == "image/jpeg":
+        return first_chunk.startswith(b"\xff\xd8\xff")
+    if content_type == "image/png":
+        return first_chunk.startswith(b"\x89PNG\r\n\x1a\n")
+    if content_type == "image/webp":
+        return len(first_chunk) >= 12 and first_chunk[:4] == b"RIFF" and first_chunk[8:12] == b"WEBP"
+    if content_type == "application/pdf":
+        return first_chunk.startswith(b"%PDF-")
+    return False
 
 
 def product_presentation(code: str, name: str) -> tuple[str, str, str]:
@@ -289,11 +319,83 @@ def api_checkout(payload: CheckoutRequest, request: Request) -> JSONResponse:
     except requests.RequestException:
         return JSONResponse({"ok": False, "error": "No pudimos registrar el pedido. Inténtalo nuevamente."}, status_code=502)
     tracking_url = safe_tracking_url(result.get("order_url"))
+    if payload.payment_method != "CONTRA_ENTREGA" and result.get("pedido_id"):
+        try:
+            pg_post("/rpc/marcar_pago_requiere_comprobante", {
+                "p_pedido_id": result.get("pedido_id"),
+                "p_required": True,
+                "p_notes": "Comprobante pendiente de carga desde la tienda web.",
+            })
+        except requests.RequestException as exc:
+            logging.warning("Could not mark payment proof required for pedido_id=%s: %s", result.get("pedido_id"), exc)
     whatsapp_message = web_order_whatsapp_message(payload, items, result.get("pedido_num"), result.get("total"), tracking_url)
     response = {"ok": True, "order_number": result.get("pedido_num"), "total": result.get("total"), "payment_method": result.get("payment_method"), "tracking_url": tracking_url, "whatsapp_url": f"https://wa.me/{WHATSAPP_NUMBER}?text={quote(whatsapp_message, safe='')}"}
     with _checkout_lock:
         _checkout_results[payload.idempotency_key] = (time.monotonic(), response)
     return JSONResponse(response, status_code=201)
+
+
+@app.post("/api/payment-proof")
+async def api_payment_proof(
+    request: Request,
+    pedido_num: str = Form(...),
+    token: str = Form(...),
+    proof: UploadFile = File(...),
+) -> JSONResponse:
+    if not permit_checkout("proof:" + client_identity(request)):
+        return JSONResponse({"ok": False, "error": "Demasiados intentos. Espera unos minutos."}, status_code=429)
+    content_type = str(proof.content_type or "").lower()
+    file_info = PAYMENT_PROOF_TYPES.get(content_type)
+    if not file_info:
+        return JSONResponse({"ok": False, "error": "Sube una imagen JPG, PNG, WebP o un PDF."}, status_code=415)
+    try:
+        data = public_order(pedido_num, token)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=403)
+    except requests.RequestException:
+        return JSONResponse({"ok": False, "error": "No pudimos validar el pedido."}, status_code=502)
+    order = data.get("order") or {}
+    payment_method = str(order.get("metodo_pago") or order.get("payment_method") or "").upper()
+    if payment_method == "CONTRA_ENTREGA":
+        return JSONResponse({"ok": False, "error": "Este pedido se paga contra entrega y no requiere comprobante."}, status_code=409)
+    first = await proof.read(min(65536, PAYMENT_PROOF_MAX_BYTES + 1))
+    if not proof_file_signature_ok(content_type, first):
+        return JSONResponse({"ok": False, "error": "El contenido del archivo no coincide con su formato."}, status_code=415)
+    PAYMENT_RECEIPT_DIR.mkdir(parents=True, exist_ok=True)
+    extension, media_type = file_info
+    safe_order = re.sub(r"[^A-Za-z0-9_-]", "_", pedido_num.strip())[:50] or "pedido"
+    destination = PAYMENT_RECEIPT_DIR / f"web-{safe_order}-{uuid.uuid4().hex}{extension}"
+    total = 0
+    digest = hashlib.sha256()
+    try:
+        with destination.open("xb") as handle:
+            chunk = first
+            while chunk:
+                total += len(chunk)
+                if total > PAYMENT_PROOF_MAX_BYTES:
+                    raise ValueError("El comprobante supera el límite de 8 MB.")
+                digest.update(chunk)
+                handle.write(chunk)
+                chunk = await proof.read(65536)
+        result = pg_post("/rpc/registrar_comprobante_pago_whatsapp", {
+            "p_whatsapp_number": str(order.get("whatsapp_number") or order.get("cliente_whatsapp") or ""),
+            "p_media_url": None,
+            "p_local_path": str(destination),
+            "p_caption": "Comprobante cargado desde orders.replau.com",
+            "p_media_type": media_type,
+            "p_media_id": "web:" + digest.hexdigest(),
+            "p_original_filename": Path(proof.filename or ("comprobante" + extension)).name[:180],
+            "p_pedido_id": int(order["id"]),
+        })
+    except ValueError as exc:
+        destination.unlink(missing_ok=True)
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=413)
+    except (KeyError, TypeError, requests.RequestException, OSError):
+        destination.unlink(missing_ok=True)
+        return JSONResponse({"ok": False, "error": "No pudimos guardar el comprobante. Inténtalo nuevamente o envíalo por WhatsApp."}, status_code=502)
+    finally:
+        await proof.close()
+    return JSONResponse({"ok": True, "proof_id": result.get("proof_id"), "payment_status": "PROOF_RECEIVED", "message": "Comprobante recibido. Lo revisaremos antes de aprobar el pago."}, status_code=201)
 
 
 @app.get("/media/products/{filename}")
@@ -374,10 +476,11 @@ def storefront() -> HTMLResponse:
   <section class="form-section"><h3>Datos de contacto</h3><div class="two-col"><div><label for="checkoutName">Nombre</label><input id="checkoutName" autocomplete="name" maxlength="80" placeholder="Ej. Juan Pérez"></div><div><label for="checkoutPhone">WhatsApp</label><input id="checkoutPhone" inputmode="tel" autocomplete="tel" maxlength="24" placeholder="Ej. 973 875 456"></div></div></section>
   <section class="form-section"><h3>Entrega</h3><label>¿Cómo recibirás el pedido?</label><div class="choice-row"><button class="choice active" id="deliveryChoice" onclick="setFulfillment('DELIVERY')">🛵 Delivery</button><button class="choice" id="pickupChoice" onclick="setFulfillment('PICKUP')">🏪 Recojo</button></div>
   <div id="deliveryFields"><label for="checkoutAddress">Dirección y referencia</label><textarea id="checkoutAddress" maxlength="300" rows="3" placeholder="Calle, número, distrito y referencia"></textarea><button class="location" onclick="useLocation()" id="locationButton">📍 Agregar mi ubicación actual</button></div></section>
-  <section class="form-section"><h3>Pago y detalles</h3><label for="checkoutPayment">Forma de pago</label><select id="checkoutPayment"><option value="CONTRA_ENTREGA">Contra entrega</option><option value="YAPE">Yape · comprobante por WhatsApp</option><option value="PLIN">Plin · comprobante por WhatsApp</option><option value="TRANSFERENCIA">Transferencia · comprobante por WhatsApp</option></select>
+  <section class="form-section"><h3>Pago y detalles</h3><label for="checkoutPayment">Forma de pago</label><select id="checkoutPayment" onchange="toggleProofField()"><option value="CONTRA_ENTREGA">Contra entrega</option><option value="YAPE">Yape</option><option value="PLIN">Plin</option><option value="TRANSFERENCIA">Transferencia</option></select>
+  <div id="proofField" hidden><label for="checkoutProof">Comprobante de pago</label><input id="checkoutProof" type="file" accept="image/jpeg,image/png,image/webp,application/pdf"><p class="notice">JPG, PNG, WebP o PDF, máximo 8 MB. Caja lo revisará antes de aprobar el pago.</p></div>
   <label for="checkoutNotes">Notas (opcional)</label><textarea id="checkoutNotes" maxlength="300" rows="2" placeholder="Sin cebolla, tocar el timbre..."></textarea></section>
   <label class="hp" aria-hidden="true">Website<input id="checkoutWebsite" tabindex="-1" autocomplete="off"></label>
-  <p class="error" id="checkoutError" role="alert"></p><button class="checkout" id="placeOrder" onclick="placeOrder()">Confirmar pedido · <span id="checkoutButtonTotal">S/ 0.00</span></button><p class="notice">Revisaremos nuevamente disponibilidad y precios. Para pagos digitales coordinaremos el comprobante por WhatsApp.</p>
+  <p class="error" id="checkoutError" role="alert"></p><button class="checkout" id="placeOrder" onclick="placeOrder()">Confirmar pedido · <span id="checkoutButtonTotal">S/ 0.00</span></button><p class="notice">Revisaremos nuevamente disponibilidad y precios. WhatsApp seguirá disponible si necesitas ayuda.</p>
 </div><div id="checkoutSuccess" class="success" hidden></div></section></div>
 <script>
 const ITEMS={items_json}; const WA={json.dumps(whatsapp_url)}; const CATEGORY_ORDER=['Todos','Combos','Hamburguesas','Alitas','Acompañamientos','Bebidas','Extras','Otros']; let activeCategory='Todos'; let cart=JSON.parse(localStorage.getItem('replau-cart')||'{{}}');let fulfillment='DELIVERY',coords={{latitude:null,longitude:null}},submitting=false;
@@ -399,7 +502,10 @@ function showError(message){{const el=document.getElementById('checkoutError');e
 function useLocation(){{if(!navigator.geolocation){{showError('Tu navegador no permite obtener la ubicación.');return}}const button=document.getElementById('locationButton');button.textContent='Obteniendo ubicación…';navigator.geolocation.getCurrentPosition(position=>{{coords={{latitude:position.coords.latitude,longitude:position.coords.longitude}};button.textContent='✅ Ubicación agregada'}},()=>{{button.textContent='📍 Agregar mi ubicación actual';showError('No pudimos obtener tu ubicación. Puedes continuar escribiendo la dirección.')}},{{enableHighAccuracy:true,timeout:10000,maximumAge:60000}})}}
 function newKey(){{return (crypto.randomUUID?crypto.randomUUID():`${{Date.now()}}-${{Math.random()}}`)+'-'+Date.now()}}
 async function placeOrder(){{if(submitting)return;const name=document.getElementById('checkoutName').value.trim(),phone=document.getElementById('checkoutPhone').value.trim(),address=document.getElementById('checkoutAddress').value.trim();if(name.length<2){{showError('Escribe tu nombre.');return}}if(phone.replace(/\\D/g,'').length<9){{showError('Ingresa un número de WhatsApp válido.');return}}if(fulfillment==='DELIVERY'&&address.length<8){{showError('Ingresa tu dirección completa.');return}}submitting=true;const button=document.getElementById('placeOrder');button.disabled=true;button.textContent='Creando pedido…';document.getElementById('checkoutError').style.display='none';let key=sessionStorage.getItem('replau-checkout-key');if(!key){{key=newKey();sessionStorage.setItem('replau-checkout-key',key)}}try{{const response=await fetch('/api/checkout',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{customer_name:name,phone,fulfillment,address,latitude:coords.latitude,longitude:coords.longitude,payment_method:document.getElementById('checkoutPayment').value,notes:document.getElementById('checkoutNotes').value.trim(),idempotency_key:key,website:document.getElementById('checkoutWebsite').value,items:selected().map(i=>({{product_id:i.id,quantity:i.qty}}))}})}});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'No pudimos crear el pedido.');cart={{}};save();sessionStorage.removeItem('replau-checkout-key');document.getElementById('checkoutForm').hidden=true;const success=document.getElementById('checkoutSuccess');success.hidden=false;success.innerHTML=`<div class="check">✅</div><h2>Pedido ${{escapeHtml(data.order_number)}} confirmado</h2><p>Total: <strong>${{money(Number(data.total||0))}}</strong></p>${{data.tracking_url?`<a href="${{escapeHtml(data.tracking_url)}}">Seguir mi pedido</a>`:''}}<a class="secondary" href="${{escapeHtml(data.whatsapp_url)}}">Enviar datos del pedido por WhatsApp</a>`}}catch(error){{showError(error.message);submitting=false;button.disabled=false;button.textContent='Crear pedido'}}}}
-document.addEventListener('keydown',event=>{{if(event.key==='Escape')closeCheckout()}});document.getElementById('checkoutModal').addEventListener('click',event=>{{if(event.target.id==='checkoutModal')closeCheckout()}});renderCategories();renderMenu();renderCart();
+function toggleProofField(){{document.getElementById('proofField').hidden=document.getElementById('checkoutPayment').value==='CONTRA_ENTREGA'}}
+async function uploadProof(data,file){{const tracking=new URL(data.tracking_url,location.origin),form=new FormData();form.append('pedido_num',data.order_number);form.append('token',tracking.searchParams.get('token')||'');form.append('proof',file);const response=await fetch('/api/payment-proof',{{method:'POST',body:form}}),result=await response.json();if(!response.ok||!result.ok)throw new Error(result.error||'No pudimos subir el comprobante.');return result}}
+async function placeOrder(){{if(submitting)return;const name=document.getElementById('checkoutName').value.trim(),phone=document.getElementById('checkoutPhone').value.trim(),address=document.getElementById('checkoutAddress').value.trim(),payment=document.getElementById('checkoutPayment').value,proof=document.getElementById('checkoutProof').files[0];if(name.length<2){{showError('Escribe tu nombre.');return}}if(phone.replace(/\D/g,'').length<9){{showError('Ingresa un número de WhatsApp válido.');return}}if(fulfillment==='DELIVERY'&&address.length<8){{showError('Ingresa tu dirección completa.');return}}if(payment!=='CONTRA_ENTREGA'&&!proof){{showError('Selecciona tu comprobante de pago. También puedes elegir contra entrega.');return}}if(proof&&proof.size>8388608){{showError('El comprobante supera el límite de 8 MB.');return}}submitting=true;const button=document.getElementById('placeOrder');button.disabled=true;button.textContent='Creando pedido…';document.getElementById('checkoutError').style.display='none';let key=sessionStorage.getItem('replau-checkout-key');if(!key){{key=newKey();sessionStorage.setItem('replau-checkout-key',key)}}try{{const response=await fetch('/api/checkout',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{customer_name:name,phone,fulfillment,address,latitude:coords.latitude,longitude:coords.longitude,payment_method:payment,notes:document.getElementById('checkoutNotes').value.trim(),idempotency_key:key,website:document.getElementById('checkoutWebsite').value,items:selected().map(i=>({{product_id:i.id,quantity:i.qty}}))}})}});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'No pudimos crear el pedido.');let proofResult=null,proofError='';if(proof){{button.textContent='Subiendo comprobante…';try{{proofResult=await uploadProof(data,proof)}}catch(error){{proofError=error.message}}}}cart={{}};save();sessionStorage.removeItem('replau-checkout-key');document.getElementById('checkoutForm').hidden=true;const success=document.getElementById('checkoutSuccess');success.hidden=false;const paymentNotice=proofResult?'<p><strong>Comprobante recibido.</strong> Caja lo revisará y verás el estado en el seguimiento.</p>':proofError?`<p class="error" style="display:block">Pedido confirmado, pero el comprobante no subió: ${{escapeHtml(proofError)}}</p>`:'';success.innerHTML=`<div class="check">✅</div><h2>Pedido ${{escapeHtml(data.order_number)}} confirmado</h2><p>Total: <strong>${{money(Number(data.total||0))}}</strong></p>${{paymentNotice}}${{data.tracking_url?`<a href="${{escapeHtml(data.tracking_url)}}">Seguir mi pedido</a>`:''}}<a class="secondary" href="${{escapeHtml(data.whatsapp_url)}}">${{proofError?'Enviar comprobante por WhatsApp':'Abrir WhatsApp'}}</a>`}}catch(error){{showError(error.message);submitting=false;button.disabled=false;button.textContent='Crear pedido'}}}}
+document.addEventListener('keydown',event=>{{if(event.key==='Escape')closeCheckout()}});document.getElementById('checkoutModal').addEventListener('click',event=>{{if(event.target.id==='checkoutModal')closeCheckout()}});toggleProofField();renderCategories();renderMenu();renderCart();
 </script>
 </body></html>""", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY"})
 

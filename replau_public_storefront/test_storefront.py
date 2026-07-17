@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from starlette.requests import Request
 
-from public_storefront import CheckoutItem, CheckoutRequest, api_checkout, checkout_items, menu_items, safe_tracking_url, storefront
+from public_storefront import CheckoutItem, CheckoutRequest, api_checkout, checkout_items, menu_items, proof_file_signature_ok, safe_tracking_url, storefront
 
 
 def main() -> None:
@@ -34,6 +34,14 @@ def main() -> None:
     assert "Agregar al carrito" in page
     assert "Tu antojo, a unos cuantos clics." in page
     assert "Continuar en WhatsApp" not in page
+    assert 'id="checkoutProof"' in page
+    assert "fetch('/api/payment-proof'" in page
+    assert "Comprobante recibido" in page
+    assert proof_file_signature_ok("image/jpeg", b"\xff\xd8\xfftest")
+    assert proof_file_signature_ok("image/png", b"\x89PNG\r\n\x1a\nrest")
+    assert proof_file_signature_ok("image/webp", b"RIFF1234WEBPrest")
+    assert proof_file_signature_ok("application/pdf", b"%PDF-1.7")
+    assert not proof_file_signature_ok("image/png", b"not-a-png")
     assert safe_tracking_url("https://orders.replau.com/order/token") == "https://orders.replau.com/track/token"
     first = items[0]
     payload = CheckoutRequest(

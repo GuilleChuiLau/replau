@@ -2709,6 +2709,21 @@ def render_tracking_page(data: Dict[str, Any], token: str) -> str:
     destino = esc(order.get("direccion_confirmada") or order.get("direccion_detectada") or "")
     maps_url = order.get("maps_url")
     destino_link = f'<a class="button secondary" href="{esc(maps_url)}" target="_blank">Ver destino</a>' if maps_url else ""
+    payment_status = str(order.get("payment_status") or "PENDING").upper()
+    payment_copy = {
+        "PROOF_REQUIRED": ("Pendiente de comprobante", "Sube tu comprobante desde el checkout o envíalo por WhatsApp.", "priority-orange"),
+        "PROOF_RECEIVED": ("Comprobante en revisión", "Caja recibió el archivo y verificará los datos antes de aprobarlo.", "priority-orange"),
+        "PAID_VERIFIED": ("Pago verificado", "Tu pago fue revisado y aprobado.", "priority-green"),
+        "PAYMENT_REJECTED": ("Comprobante rechazado", "Revisa el mensaje enviado por WhatsApp y presenta un nuevo comprobante.", "priority-red"),
+        "PAYMENT_ON_DELIVERY": ("Pago contra entrega", "Pagarás al recibir o recoger el pedido.", ""),
+        "PENDING": ("Pago pendiente", "El estado del pago se actualizará aquí.", ""),
+    }.get(payment_status, ("Pago pendiente", "El estado del pago se actualizará aquí.", ""))
+    payment_panel = f"""
+      <div class="panel {payment_copy[2]}">
+        <div class="panel-head"><h2>Estado del pago</h2><div class="panel-sub">{esc(order.get('metodo_pago') or '')}</div></div>
+        <p><strong>{esc(payment_copy[0])}</strong></p><p>{esc(payment_copy[1])}</p>
+      </div>
+    """
 
     if assignment:
         driver_name = esc(assignment.get("repartidor_nombre") or "Repartidor")
@@ -2765,6 +2780,8 @@ def render_tracking_page(data: Dict[str, Any], token: str) -> str:
 
       {render_customer_tracking_progress(order, assignment)}
 
+      {payment_panel}
+
       <div class="panel">
         <div class="grid-cards" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
           <div class="summary-card"><div class="k">Pedido</div><div class="v" style="font-size:18px">{pedido_num}</div></div>
@@ -2797,6 +2814,13 @@ def fetch_public_order(pedido_num: str, token: str) -> Dict[str, Any]:
     )
     if not data.get("ok"):
         raise HTTPException(status_code=403, detail=data)
+    order = data.get("order") or {}
+    pedido_id = order.get("id")
+    if pedido_id is not None:
+        rows = pg_get(f"/pedidos?id=eq.{int(pedido_id)}&select=payment_status,payment_proof_required&limit=1")
+        if rows:
+            order.update(rows[0])
+            data["order"] = order
     return data
 
 
