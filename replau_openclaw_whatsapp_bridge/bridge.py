@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -598,7 +598,12 @@ def extract_payload(data: Dict[str, Any]) -> NormalizedWebhook:
     except Exception:
         pass
 
-    if latitude is None and longitude is None:
+    # A web-order handoff can contain a Google Maps URL as one field.  It is
+    # still a structured text message; promoting the whole payload to a
+    # location discards the customer, items, address, and payment fields.
+    first_line = normalize_loose_text(str(message_text or "").splitlines()[0])
+    is_structured_web_order = first_line.startswith("pedido web confirmado")
+    if latitude is None and longitude is None and not is_structured_web_order:
         parsed_latitude, parsed_longitude = parse_location_from_text(message_text)
         if parsed_latitude is not None and parsed_longitude is not None:
             latitude = parsed_latitude
@@ -1451,6 +1456,82 @@ def is_web_order_handoff(text: Optional[str]) -> bool:
     if not text:
         return False
     return normalize_loose_text(str(text).splitlines()[0]).startswith("pedido web confirmado")
+
+
+def web_order_handoff_credentials(text: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Extract the order number, signed tracking token, and tracking URL."""
+    if not is_web_order_handoff(text):
+        return None, None, None
+    value = str(text)
+    order_match = re.search(r"pedido\s+web\s+confirmado\s*:\s*([A-Za-z0-9_-]+)", value, re.IGNORECASE)
+    url_match = re.search(r"https?://[^\s]+/track/([A-Za-z0-9_-]+)\?[^\s]+", value, re.IGNORECASE)
+    if not order_match or not url_match:
+        return None, None, None
+    tracking_url = url_match.group(0).rstrip(".,;)")
+    query = parse_qs(urlparse(tracking_url).query)
+    token = first_non_empty(*(query.get("token") or []))
+    url_order = url_match.group(1)
+    order_num = order_match.group(1)
+    if normalize_loose_text(order_num) != normalize_loose_text(url_order):
+        return None, None, None
+    return order_num, token, tracking_url
+
+
+def handle_web_order_handoff(inbound: NormalizedWebhook) -> Dict[str, Any]:
+    """Validate a signed storefront handoff and link it to this WhatsApp chat."""
+    pedido_num, token, tracking_url = web_order_handoff_credentials(inbound.message_text)
+    if not pedido_num or not token:
+        text = "No pude validar los datos del pedido web. Ábrelo nuevamente desde la página de confirmación."
+        log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", text)
+        return reply(text, next_state="ASKING_NAME_AND_ITEMS", web_order_handoff=False)
+
+    result = pg_post("/rpc/obtener_pedido_publico", {"p_pedido_num": pedido_num, "p_token": token})
+    if not isinstance(result, dict) or not result.get("ok") or not isinstance(result.get("order"), dict):
+        text = "El enlace del pedido web es inválido o venció. Abre nuevamente el seguimiento desde la página."
+        log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", text)
+        return reply(text, next_state="ASKING_NAME_AND_ITEMS", web_order_handoff=False)
+
+    order = result["order"]
+    items = result.get("items") if isinstance(result.get("items"), list) else []
+    draft = {
+        "pedido_id": order.get("id"),
+        "pedido_num": order.get("pedido_num") or pedido_num,
+        "customer_name": order.get("cliente_nombre"),
+        "items": items,
+        "total": order.get("total"),
+        "payment_method": order.get("metodo_pago"),
+        "written_address": order.get("direccion_escrita"),
+        "confirmed_address": order.get("direccion_confirmada") or order.get("direccion_detectada"),
+        "latitude": order.get("latitud_entrega"),
+        "longitude": order.get("longitud_entrega"),
+        "tracking_url": tracking_url,
+        "source": "WEB",
+        "confirmation_result": {
+            "pedido_id": order.get("id"),
+            "pedido_num": order.get("pedido_num") or pedido_num,
+            "total": order.get("total"),
+            "tracking_url": tracking_url,
+        },
+    }
+    text = f"Recibí tu pedido web {draft['pedido_num']} ✅"
+    if draft.get("customer_name"):
+        text += f"\nCliente: {draft['customer_name']}"
+    if draft.get("total") is not None:
+        text += f"\nTotal: S/ {float(draft['total']):.2f}"
+    if draft.get("payment_method"):
+        text += f"\nPago: {draft['payment_method']}"
+    if tracking_url:
+        text += f"\n\nSigue tu pedido aquí:\n{tracking_url}"
+    if draft.get("payment_method") in {"YAPE", "PLIN", "TRANSFERENCIA"}:
+        text += "\n\nSi el comprobante no se cargó en la web, envíalo aquí como foto o PDF."
+    patch_conversation(inbound.whatsapp_number, {
+        "estado": "CONFIRMED",
+        "pedido_id": order.get("id"),
+        "pedido_borrador": draft,
+        "last_outbound_text": text,
+    })
+    log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", text)
+    return reply(text, next_state="CONFIRMED", web_order_handoff=True, pedido_id=order.get("id"))
 
 
 def menu_reply_text() -> str:
@@ -3144,6 +3225,11 @@ def route_message(inbound: NormalizedWebhook) -> Dict[str, Any]:
             handoff_reason=handoff.get("reason") or "",
             handoff_updated_at=handoff.get("updated_at") or "",
         )
+
+    # Storefront orders are already confirmed transactions. Recognize their
+    # signed handoff independently of stale WhatsApp conversation state.
+    if inbound.message_type == "text" and is_web_order_handoff(inbound.message_text):
+        return handle_web_order_handoff(inbound)
 
     if ordering_is_paused() and state not in {"CONFIRMED"}:
         text = restaurant_closed_reply_text()

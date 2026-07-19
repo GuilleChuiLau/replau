@@ -37,6 +37,54 @@ class MenuIntentTest(unittest.TestCase):
         self.assertTrue(self.bridge.is_web_order_handoff(message))
         self.assertFalse(self.bridge.is_web_order_handoff("Memo\n2 hamburguesas"))
 
+    def test_web_handoff_with_maps_url_stays_text(self):
+        message = (
+            "PEDIDO WEB CONFIRMADO: PED-123\n"
+            "Nombre: Memo\nProductos:\n- 2 x Hamburguesa\n"
+            "Ubicación: https://www.google.com/maps?q=-12.1199,-76.9917\n"
+            "Pago: Yape\n"
+            "Seguimiento: https://orders.replau.com/track/PED-123?token=signed-token"
+        )
+        inbound = self.bridge.extract_payload({"whatsapp_number": "51999999999", "message_text": message})
+        self.assertEqual(inbound.message_type, "text")
+        self.assertIsNone(inbound.latitude)
+        self.assertIsNone(inbound.longitude)
+
+    def test_signed_web_handoff_links_order_from_any_conversation_state(self):
+        message = (
+            "PEDIDO WEB CONFIRMADO: PED-123\nNombre: Memo\n"
+            "Ubicación: https://www.google.com/maps?q=-12.1199,-76.9917\nPago: Yape\n"
+            "Seguimiento: https://orders.replau.com/track/PED-123?token=signed-token"
+        )
+        inbound = self.bridge.NormalizedWebhook(
+            whatsapp_number="51999999999", message_type="text", message_text=message
+        )
+        public_order = {
+            "ok": True,
+            "order": {
+                "id": 123,
+                "pedido_num": "PED-123",
+                "cliente_nombre": "Memo",
+                "total": 42.5,
+                "metodo_pago": "YAPE",
+                "direccion_confirmada": "Av. Prueba 123",
+            },
+            "items": [{"producto_nombre": "Hamburguesa", "cantidad": 2}],
+        }
+        with patch.object(self.bridge, "pg_post", return_value=public_order) as post, patch.object(
+            self.bridge, "patch_conversation"
+        ) as update, patch.object(self.bridge, "log_whatsapp_message"):
+            result = self.bridge.handle_web_order_handoff(inbound)
+        post.assert_called_once_with(
+            "/rpc/obtener_pedido_publico", {"p_pedido_num": "PED-123", "p_token": "signed-token"}
+        )
+        saved = update.call_args.args[1]
+        self.assertEqual(saved["estado"], "CONFIRMED")
+        self.assertEqual(saved["pedido_id"], 123)
+        self.assertEqual(saved["pedido_borrador"]["customer_name"], "Memo")
+        self.assertEqual(saved["pedido_borrador"]["payment_method"], "YAPE")
+        self.assertTrue(result["web_order_handoff"])
+
     def test_confirmed_order_receipt_is_registered_against_existing_order(self):
         inbound = self.bridge.NormalizedWebhook(
             whatsapp_number="51999999999",
