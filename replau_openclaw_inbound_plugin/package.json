@@ -1,0 +1,23 @@
+{
+  "name": "@replau/openclaw-whatsapp-inbound",
+  "version": "1.0.1",
+  "private": true,
+  "type": "module",
+  "peerDependencies": {
+    "openclaw": ">=2026.7.1"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test router-core.test.ts"
+  },
+  "openclaw": {
+    "extensions": ["./index.ts"],
+    "compat": {
+      "pluginApi": ">=2026.7.1",
+      "minGatewayVersion": ">=2026.7.1"
+    },
+    "build": {
+      "openclawVersion": "2026.7.1",
+      "pluginSdkVersion": "2026.7.1"
+    }
+  }
+}

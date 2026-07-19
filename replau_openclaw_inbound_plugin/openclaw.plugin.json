@@ -1,0 +1,34 @@
+{
+  "id": "replau-whatsapp-inbound",
+  "name": "Replau WhatsApp Inbound Router",
+  "description": "Claims WhatsApp customer messages and routes them through the deterministic Replau ordering bridge.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "bridgeUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:8789/webhook/whatsapp"
+      },
+      "envFile": {
+        "type": "string",
+        "default": "/home/guill/.config/replau/bridge.env"
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 30000,
+        "default": 15000
+      },
+      "maxMediaBytes": {
+        "type": "integer",
+        "minimum": 1024,
+        "maximum": 16777216,
+        "default": 8388608
+      }
+    }
+  }
+}
