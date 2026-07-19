@@ -17,6 +17,14 @@
         "type": "string",
         "default": "/home/guill/.config/replau/bridge.env"
       },
+      "adapterUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:8792/send/whatsapp"
+      },
+      "adapterEnvFile": {
+        "type": "string",
+        "default": "/home/guill/.config/replau/adapter.env"
+      },
       "timeoutMs": {
         "type": "integer",
         "minimum": 1000,

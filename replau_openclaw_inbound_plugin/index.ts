@@ -13,6 +13,8 @@ import {
 
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:8789/webhook/whatsapp";
 const DEFAULT_ENV_FILE = "/home/guill/.config/replau/bridge.env";
+const DEFAULT_ADAPTER_URL = "http://127.0.0.1:8792/send/whatsapp";
+const DEFAULT_ADAPTER_ENV_FILE = "/home/guill/.config/replau/adapter.env";
 type InboundData = {
   customer: string;
   content: string;
@@ -64,6 +66,28 @@ async function routeToBridge(api: any, data: InboundData): Promise<string> {
   return replyText;
 }
 
+async function sendViaAdapter(api: any, customer: string, messageText: string): Promise<void> {
+  const config = (api.pluginConfig ?? {}) as Record<string, unknown>;
+  const adapterUrl = String(config.adapterUrl || DEFAULT_ADAPTER_URL);
+  const adapterEnvFile = String(config.adapterEnvFile || DEFAULT_ADAPTER_ENV_FILE);
+  const timeoutMs = Number(config.timeoutMs || 15000);
+  const envText = await readFile(adapterEnvFile, "utf8");
+  const hookToken = envValue(envText, "HOOK_TOKEN");
+  if (!hookToken) throw new Error("adapter HOOK_TOKEN is missing");
+
+  const response = await fetch(adapterUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-hook-token": hookToken },
+    body: JSON.stringify({
+      whatsapp_number: customer,
+      message_text: messageText,
+      event_type: "REPLAU_INBOUND_REPLY",
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`send adapter returned HTTP ${response.status}`);
+}
+
 export default definePluginEntry({
   id: "replau-whatsapp-inbound",
   name: "Replau WhatsApp Inbound Router",
@@ -96,7 +120,8 @@ export default definePluginEntry({
           senderName: event.senderName,
           metadata: event.metadata,
         });
-        return { handled: true, reply: { text: replyText } };
+        await sendViaAdapter(api, customer, replyText);
+        return { handled: true };
       } catch (error) {
         api.logger.error(`Replau inbound router failed: ${error instanceof Error ? error.message : String(error)}`);
         return {
@@ -122,8 +147,9 @@ export default definePluginEntry({
           content: String(event.body || event.content || "").trim(),
           accountId: ctx.accountId,
         });
+        await sendViaAdapter(api, customer, text);
         api.logger.info(`Replau routed WhatsApp inbound for session ${ctx.sessionKey || customer}`);
-        return { handled: true, text };
+        return { handled: true };
       } catch (error) {
         api.logger.error(`Replau before-dispatch routing failed: ${error instanceof Error ? error.message : String(error)}`);
         return {
