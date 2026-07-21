@@ -26,6 +26,31 @@ or payment-provider source.
 - RPC to verify/reject a proof
 - Review UI on `http://127.0.0.1:8795`
 - Customer WhatsApp notifications when proof is verified/rejected
+- One durable payment-fulfillment record per order
+- Strict, version-checked transitions for release, COD collection, reconciliation,
+  settlement, cancellation, and refunds
+- Append-only payment fulfillment event history for audit and reporting
+
+## Payment fulfillment states
+
+`add_payment_fulfillment.sql` keeps the existing proof workflow compatible while
+adding the financial lifecycle:
+
+```text
+PAYMENT_REQUESTED / COD_DUE
+  -> PROOF_REQUIRED -> UNDER_REVIEW -> VERIFIED -> RELEASED
+  -> COD_COLLECTED
+  -> RECONCILED -> SETTLED
+```
+
+Rejected proofs can return to proof collection. Verified, collected,
+reconciled, or settled payments can enter `REFUND_PENDING`, followed by a
+partial or full refund. Every accepted transition records the actor, source,
+note, amount, and previous/new status. Callers may pass `p_expected_version` to
+prevent two cashiers from acting on stale state.
+
+OCR remains advisory. `VERIFIED` still requires a cashier decision unless a
+future authoritative provider reconciliation integration supplies the decision.
 
 ## Install
 

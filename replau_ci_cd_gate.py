@@ -203,6 +203,11 @@ def check_python_compile(gate: Gate) -> None:
     gate.run("Python compile check", [sys.executable, "-m", "py_compile", *files], timeout=90)
 
 
+def check_payment_fulfillment_contract(gate: Gate) -> None:
+    test_file = ROOT / "replau_payment_proof_flow_package/test_payment_fulfillment.py"
+    gate.run("Payment fulfillment contract", [sys.executable, str(test_file)], timeout=30)
+
+
 def check_source_deploy_drift(gate: Gate) -> None:
     for pair in DEPLOY_PAIRS:
         if not pair.source.exists():
@@ -320,6 +325,7 @@ def main() -> int:
 
     gate = Gate()
     check_python_compile(gate)
+    check_payment_fulfillment_contract(gate)
     if not args.skip_deploy_drift:
         check_source_deploy_drift(gate)
     if args.require_clean_git:

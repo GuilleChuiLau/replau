@@ -10,7 +10,10 @@ cd "$SCRIPT_DIR"
 echo "1) Applying SQL payment-proof upgrade..."
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d localapi < add_payment_proof_flow.sql
 
-echo "2) Installing review UI into $APP_DIR..."
+echo "2) Applying payment-fulfillment ledger upgrade..."
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d localapi < add_payment_fulfillment.sql
+
+echo "3) Installing review UI into $APP_DIR..."
 sudo mkdir -p "$APP_DIR"
 sudo chown -R "$USER:$USER" "$APP_DIR"
 cp replau_payment_proof_review.py payment_proof_ocr.py requirements.txt replau-payment-proof-review.service test_payment_proof_flow.sh "$APP_DIR/"
