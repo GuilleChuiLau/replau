@@ -154,13 +154,39 @@ def parse_event_time(value: str | None) -> datetime | None:
         return None
 
 
-def count_recent_disconnects(events: list[dict], window_seconds: int) -> int:
+def disconnect_incidents(events: list[dict]) -> list[dict]:
+    """Collapse multiple log lines from one outage into a single incident."""
+    incidents: list[dict] = []
+    current: dict | None = None
+    for event in events:
+        if event.get("kind") == "disconnected":
+            if current is None:
+                current = {
+                    "disconnected_at": event.get("at"),
+                    "disconnect_message": event.get("message"),
+                    "log_event_count": 1,
+                }
+            else:
+                current["log_event_count"] = int(current.get("log_event_count") or 0) + 1
+        elif event.get("kind") == "connected" and current is not None:
+            current["reconnected_at"] = event.get("at")
+            start = parse_event_time(current.get("disconnected_at"))
+            end = parse_event_time(event.get("at"))
+            current["duration_seconds"] = max(0, int((end - start).total_seconds())) if start and end else None
+            incidents.append(current)
+            current = None
+    if current is not None:
+        current["reconnected_at"] = None
+        current["duration_seconds"] = seconds_since(current.get("disconnected_at"))
+        incidents.append(current)
+    return incidents
+
+
+def count_recent_disconnects(incidents: list[dict], window_seconds: int) -> int:
     cutoff = utc_now().timestamp() - window_seconds
     count = 0
-    for event in events:
-        if event.get("kind") != "disconnected":
-            continue
-        parsed = parse_event_time(event.get("at"))
+    for incident in incidents:
+        parsed = parse_event_time(incident.get("disconnected_at"))
         if parsed and parsed.timestamp() >= cutoff:
             count += 1
     return count
@@ -264,6 +290,7 @@ def main() -> int:
     health = gateway_health()
     outbox = outbox_impact()
     events = journal_events()
+    incidents = disconnect_incidents(events)
     whatsapp_health = (health.get("json") or {}).get("channels", {}).get("whatsapp", {})
     health_connected = bool(whatsapp_health.get("connected") or whatsapp_health.get("linked"))
     health_state = whatsapp_health.get("healthState") or whatsapp_health.get("statusState")
@@ -286,8 +313,9 @@ def main() -> int:
     disconnected_age = seconds_since(last_disconnect)
     connected_after_disconnect = bool(last_connected and last_disconnect and last_connected >= last_disconnect)
     connected = health_connected or (bool(last_connected) and (not last_disconnect or connected_after_disconnect))
-    recent_disconnect_count = count_recent_disconnects(events, DISCONNECT_BURST_WINDOW_SECONDS)
-    daily_disconnect_count = count_recent_disconnects(events, DISCONNECT_DAILY_WINDOW_SECONDS)
+    recent_disconnect_count = count_recent_disconnects(incidents, DISCONNECT_BURST_WINDOW_SECONDS)
+    daily_disconnect_count = count_recent_disconnects(incidents, DISCONNECT_DAILY_WINDOW_SECONDS)
+    last_incident = incidents[-1] if incidents else {}
     disconnect_burst_warning = (
         recent_disconnect_count >= DISCONNECT_BURST_THRESHOLD
         or daily_disconnect_count >= DISCONNECT_DAILY_THRESHOLD
@@ -383,6 +411,9 @@ def main() -> int:
             "disconnect_daily_window_seconds": DISCONNECT_DAILY_WINDOW_SECONDS,
             "disconnect_daily_threshold": DISCONNECT_DAILY_THRESHOLD,
             "disconnects_in_daily_window": daily_disconnect_count,
+            "last_recovery_duration_seconds": last_incident.get("duration_seconds"),
+            "last_reconnected_at": last_incident.get("reconnected_at"),
+            "recent_disconnect_incidents": incidents[-10:],
             "recent_event_count": len([e for e in events if e.get("kind") in {"connected", "disconnected"}]),
             "postgrest_base_url": POSTGREST_BASE_URL,
             "outbox": outbox,

@@ -22,6 +22,20 @@ curl http://127.0.0.1:8793/health | jq
 systemctl list-timers replau-daily-backup.timer replau-stuck-monitor.timer replau-whatsapp-watchdog.timer --no-pager
 ```
 
+## Reliability signals
+
+- Backup health first inspects the configured dump directory. If PostgreSQL's
+  protected permissions prevent the user dashboard from reading it, the
+  dashboard verifies the last `replau-daily-backup.service` result instead of
+  reporting a false missing-backup warning.
+- Set `EMAIL_NOTIFICATIONS_ENABLED=true` only after an email worker and SMTP
+  delivery are intentionally configured. Pending historical rows remain visible
+  while the channel is disabled, but they do not degrade overall health.
+- The WhatsApp watchdog collapses multiple timeout/recovery log lines into one
+  disconnect incident. It reports actual incident counts and recovery duration;
+  short recovered `499` reconnects do not warn unless frequency crosses the
+  configured burst/daily thresholds or message delivery is affected.
+
 Open:
 
 ```text

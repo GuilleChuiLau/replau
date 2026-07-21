@@ -20,6 +20,8 @@ REQUIRE_OPS_TOKEN=os.environ.get("REQUIRE_OPS_TOKEN","false").lower()=="true"
 OPS_TOKEN=os.environ.get("OPS_TOKEN","").strip()
 OUTBOX_MAX_ATTEMPTS=int(os.environ.get("OUTBOX_MAX_ATTEMPTS","5"))
 BACKUP_DIR=os.environ.get("BACKUP_DIR","/var/backups/replau-localapi")
+BACKUP_SERVICE=os.environ.get("BACKUP_SERVICE","replau-daily-backup.service")
+EMAIL_NOTIFICATIONS_ENABLED=os.environ.get("EMAIL_NOTIFICATIONS_ENABLED","false").lower()=="true"
 WHATSAPP_WATCHDOG_STATE=os.environ.get("WHATSAPP_WATCHDOG_STATE","/home/guill/.local/state/replau/whatsapp_watchdog_state.json")
 RESTAURANT_STATUS_PATH=Path(os.environ.get("REPLAU_RESTAURANT_STATUS_PATH","/home/guill/.openclaw/workspace/replau_restaurant_status.json"))
 PURCHASE_TARGET_DAYS=float(os.environ.get("REPLAU_PURCHASE_TARGET_DAYS","3"))
@@ -442,11 +444,23 @@ def business_summary():
     }
 def latest_backup():
     p=Path(BACKUP_DIR)
-    if not p.exists(): return None
-    dumps=sorted(p.glob("*.dump"),key=lambda x:x.stat().st_mtime,reverse=True)
-    if not dumps: return None
-    f=dumps[0]
-    return {"path":str(f),"size_mb":round(f.stat().st_size/1024/1024,2),"modified_at":datetime.fromtimestamp(f.stat().st_mtime,tz=timezone.utc).isoformat().replace("+00:00","Z")}
+    try:
+        if p.exists():
+            dumps=sorted(p.glob("*.dump"),key=lambda x:x.stat().st_mtime,reverse=True)
+            if dumps:
+                f=dumps[0]
+                return {"ok":True,"source":"filesystem","path":str(f),"size_mb":round(f.stat().st_size/1024/1024,2),"modified_at":datetime.fromtimestamp(f.stat().st_mtime,tz=timezone.utc).isoformat().replace("+00:00","Z")}
+    except PermissionError:
+        pass
+    result=cmd(["systemctl","show",BACKUP_SERVICE,"--property=Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp,ActiveState","--no-pager"])
+    values={}
+    for line in result.get("stdout","").splitlines():
+        if "=" in line:
+            key,value=line.split("=",1); values[key]=value
+    successful=result.get("ok") and values.get("Result")=="success" and values.get("ExecMainStatus")=="0" and bool(values.get("ExecMainExitTimestamp"))
+    if successful:
+        return {"ok":True,"source":"systemd","service":BACKUP_SERVICE,"result":values.get("Result"),"modified_at":values.get("ExecMainExitTimestamp"),"path_visibility":"restricted"}
+    return {"ok":False,"source":"systemd","service":BACKUP_SERVICE,"result":values.get("Result") or "unknown","error":result.get("stderr") or "No successful backup execution found"}
 def whatsapp_watchdog():
     p=Path(WHATSAPP_WATCHDOG_STATE)
     try:
@@ -474,20 +488,23 @@ def collect():
     if stuck: crit.append(f"Stuck WhatsApp outbox rows: {len(stuck)}")
     if errors["data"]: crit.append(f"ERROR WhatsApp outbox rows: {len(errors['data'])}")
     if pending["data"]: warn.append(f"Pending WhatsApp notifications: {len(pending['data'])}")
-    if emails["data"]: warn.append(f"Pending logistics emails: {len(emails['data'])}")
+    email_delivery={"enabled":EMAIL_NOTIFICATIONS_ENABLED,"pending_count":len(emails["data"]),"status":"enabled" if EMAIL_NOTIFICATIONS_ENABLED else "disabled"}
+    if EMAIL_NOTIFICATIONS_ENABLED and emails["data"]: warn.append(f"Pending logistics emails: {len(emails['data'])}")
     b=latest_backup()
-    if not b: warn.append("No backup file found")
+    if not b.get("ok"): warn.append(f"Backup health unavailable: {b.get('error') or b.get('result') or 'unknown'}")
     w=whatsapp_watchdog()
     if not w["ok"]:
         crit.append(f"WhatsApp gateway status: {w.get('status','unknown')} ({w.get('error') or w.get('last_disconnect_message') or 'watchdog not healthy'})")
-    elif w.get("seconds_since_disconnect") is not None and int(w.get("seconds_since_disconnect") or 0) < 600:
-        warn.append(f"WhatsApp recovered recently: {w.get('seconds_since_disconnect')}s since last disconnect")
+    elif w.get("status") == "degraded":
+        warn.append(f"WhatsApp reconnect frequency elevated: {w.get('disconnects_in_burst_window',0)} in the recent window / {w.get('disconnects_in_daily_window',0)} in 24h")
+    elif w.get("status") == "impacted":
+        warn.append("WhatsApp is connected but message delivery is impacted")
     overall="CRITICAL" if crit else ("WARN" if warn else "OK")
     rs=restaurant_status()
     if not rs.get("accepting_orders"):
         warn.append("Restaurant ordering is paused")
         overall="CRITICAL" if crit else "WARN"
-    return {"ok":overall=="OK","overall":overall,"checked_at":now(),"critical":crit,"warnings":warn,"services":services,"ports":ports,"urls":urls,"latest_orders":orders,"kitchen":kitchen,"pending_outbox":pending,"error_outbox":errors,"pending_emails":emails,"stuck_outbox":stuck,"latest_backup":b,"whatsapp_watchdog":w,"restaurant_status":rs,"products":product_summary(),"payment_proofs":recent_payment_proofs(),"payment_proof_queue":payment_proof_queue()}
+    return {"ok":overall=="OK","overall":overall,"checked_at":now(),"critical":crit,"warnings":warn,"services":services,"ports":ports,"urls":urls,"latest_orders":orders,"kitchen":kitchen,"pending_outbox":pending,"error_outbox":errors,"pending_emails":emails,"email_delivery":email_delivery,"stuck_outbox":stuck,"latest_backup":b,"whatsapp_watchdog":w,"restaurant_status":rs,"products":product_summary(),"payment_proofs":recent_payment_proofs(),"payment_proof_queue":payment_proof_queue()}
 @app.get("/health")
 def health(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
     auth(req,x_ops_token); return collect()
@@ -591,6 +608,9 @@ def dash(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-
         "last_connected_at":w.get("last_connected_at"),
         "last_disconnect_at":w.get("last_disconnect_at"),
         "seconds_since_disconnect":w.get("seconds_since_disconnect"),
+        "last_recovery_seconds":w.get("last_recovery_duration_seconds"),
+        "disconnects_1h":w.get("disconnects_in_burst_window"),
+        "disconnects_24h":w.get("disconnects_in_daily_window"),
         "last_restart_at":w.get("last_restart_at"),
         "last_restart_reason":w.get("last_restart_reason"),
     }]
@@ -605,7 +625,7 @@ def dash(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-
 <div class="grid"><div class="card"><h2>Low Stock Risk</h2>{stock_risk_rows(owner.get("stock_risks",[]))}</div><div class="card"><h2>Margin Signals</h2>{margin_signal_rows(owner.get("margin_rows",[]))}</div></div>
 <div class="card"><h2>Manager Command Console</h2><div class="grid3"><div><h3>Ordering</h3><p>{status_badge}</p><p class="muted">Last update: {esc(rs.get("updated_at") or "not set")} by {esc(rs.get("updated_by"))}</p><form method="post" action="/api/restaurant-status{token_query(req)}"><label>Order intake</label><select name="accepting_orders"><option value="true" {"selected" if rs.get("accepting_orders") else ""}>Accept orders</option><option value="false" {"selected" if not rs.get("accepting_orders") else ""}>Pause orders</option></select><label>Internal reason</label><input name="reason" value="{esc(rs.get("reason"))}" placeholder="Closed, sold out, maintenance"><label>Customer message while paused</label><textarea name="customer_message">{esc(rs.get("customer_message"))}</textarea><br><br><button type="submit">Save ordering status</button></form></div><div><h3>Catalog</h3><p><strong>{esc(prod.get("active"))}</strong> active products<br><strong>{esc(prod.get("inactive"))}</strong> inactive products</p><p class="muted">Use Product Admin for availability, recipe costs, and low-stock alerts.</p><a class="btn" href="{esc(product_admin_url("costs"))}" target="_blank">Open Low Stock / Costs</a> <a class="btn secondary" href="{esc(product_admin_url())}" target="_blank">Open Product Admin</a></div><div><h3>Review Queues</h3><p>Payment proofs, failed WhatsApp outbox, pending emails, and kitchen state are below.</p><a class="btn" href="{esc(payment_proof_review_url())}" target="_blank">Open Payment Proofs</a> <a class="btn secondary" href="http://127.0.0.1:8790/dashboard" target="_blank">Open Logistics</a></div></div></div>
 <div class="grid"><div class="card"><h2>Critical</h2><ul>{ul(h["critical"])}</ul></div><div class="card"><h2>Warnings</h2><ul>{ul(h["warnings"])}</ul></div></div>
-<div class="card"><h2>WhatsApp Gateway</h2>{tbl(whatsapp_rows,["status","connected","gateway_health_ok","gateway_service_active","checked_at","last_connected_at","last_disconnect_at","seconds_since_disconnect","last_restart_at","last_restart_reason"])}</div>
+<div class="card"><h2>WhatsApp Gateway</h2>{tbl(whatsapp_rows,["status","connected","gateway_health_ok","gateway_service_active","checked_at","last_connected_at","last_disconnect_at","seconds_since_disconnect","last_recovery_seconds","disconnects_1h","disconnects_24h","last_restart_at","last_restart_reason"])}</div>
 <div class="card"><h2>Latest backup</h2><p>{backup_html}</p></div>
 <div class="card"><h2>Services</h2>{tbl(service_rows,["service","active","enabled"])}</div>
 <div class="grid"><div class="card"><h2>Ports</h2>{tbl(port_rows,["name","ok","host","port","error"])}</div><div class="card"><h2>URLs</h2>{tbl(url_rows,["name","ok","status","ms","url","error"])}</div></div>
@@ -615,7 +635,7 @@ def dash(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-
 <div class="card"><h2>Product Availability Sample</h2>{tbl(prod.get("sample",[]),["id","cdg_prod","nombre","active"])}</div>
 <div class="card"><h2>Pending WhatsApp Outbox</h2>{tbl(h["pending_outbox"]["data"],["id","pedido_num","event_type","status","attempts","last_attempt_at","created_at","error_message"])}</div>
 <div class="card"><h2>Error WhatsApp Outbox</h2>{tbl(h["error_outbox"]["data"],["id","pedido_num","event_type","status","attempts","last_attempt_at","created_at","error_message"])}</div>
-<div class="card"><h2>Pending Emails</h2>{tbl(h["pending_emails"]["data"],["id","pedido_id","email_to","status","attempts","created_at","error_message"])}</div>
+<div class="card"><h2>Email Notifications</h2><p class="muted">Channel: {esc(h['email_delivery']['status'])}. Pending rows are preserved and are health-impacting only when email delivery is enabled.</p>{tbl(h["pending_emails"]["data"],["id","pedido_id","recipient","status","created_at","error_message"])}</div>
 </div></body></html>''')
 if __name__=="__main__":
     import uvicorn
