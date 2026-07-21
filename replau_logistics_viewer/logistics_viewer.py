@@ -148,6 +148,97 @@ PAYMENT_COLORS = {
     "CONTRA_ENTREGA": ("#ecfccb", "#3f6212"),
 }
 
+PREPAID_RELEASED_STATES = {"RELEASED", "RECONCILED", "SETTLED"}
+COD_COLLECTED_STATES = {"COD_COLLECTED", "RECONCILED", "SETTLED"}
+
+
+def payment_fulfillment_status(order: Dict[str, Any]) -> str:
+    fulfillment = order.get("payment_fulfillment") or {}
+    return str(fulfillment.get("status") or "NOT_CREATED").upper()
+
+
+def payment_dispatch_allowed(order: Dict[str, Any]) -> bool:
+    method = str(order.get("metodo_pago") or "").upper()
+    status = payment_fulfillment_status(order)
+    if method == "CONTRA_ENTREGA":
+        return status in {"COD_DUE", *COD_COLLECTED_STATES}
+    return status in PREPAID_RELEASED_STATES
+
+
+def payment_delivery_completion_allowed(order: Dict[str, Any]) -> bool:
+    method = str(order.get("metodo_pago") or "").upper()
+    if method == "CONTRA_ENTREGA":
+        return payment_fulfillment_status(order) in COD_COLLECTED_STATES
+    return payment_dispatch_allowed(order)
+
+
+def payment_gate_reason(order: Dict[str, Any], completing: bool = False) -> str:
+    method = str(order.get("metodo_pago") or "").upper()
+    status = payment_fulfillment_status(order)
+    if method == "CONTRA_ENTREGA" and completing and status not in COD_COLLECTED_STATES:
+        return "Confirma el cobro contra entrega antes de completar el pedido."
+    if method != "CONTRA_ENTREGA" and status not in PREPAID_RELEASED_STATES:
+        return f"El pago prepago debe estar RELEASED antes del despacho (actual: {status})."
+    return ""
+
+
+def payment_fulfillment_badge(order: Dict[str, Any]) -> str:
+    status = payment_fulfillment_status(order)
+    allowed = payment_dispatch_allowed(order)
+    background = "#166534" if allowed else "#92400e"
+    foreground = "#dcfce7" if allowed else "#fef3c7"
+    return f'<span class="badge" style="background:{background};color:{foreground}">PAYMENT · {esc(status)}</span>'
+
+
+def fetch_payment_fulfillment(pedido_id: Any) -> Dict[str, Any] | None:
+    if pedido_id is None:
+        return None
+    rows = pg_get(
+        f"/v_payment_fulfillments?pedido_id=eq.{int(pedido_id)}"
+        "&select=id,pedido_id,status,payment_method,expected_amount,received_amount,refunded_amount,version,updated_at&limit=1"
+    )
+    return rows[0] if rows else None
+
+
+def cod_collection_form(order: Dict[str, Any], next_url: str = "/ops/delivery") -> str:
+    fulfillment = order.get("payment_fulfillment") or {}
+    if str(order.get("metodo_pago") or "").upper() != "CONTRA_ENTREGA" or str(fulfillment.get("status") or "").upper() != "COD_DUE":
+        return ""
+    return f"""
+      <form method="post" action="/ops/delivery/collect-cod" onsubmit="return confirm('¿Confirmas que recibiste {money(fulfillment.get('expected_amount') or order.get('total'))} de este pedido?');">
+        <input type="hidden" name="pedido_id" value="{esc(order.get('id'))}">
+        <input type="hidden" name="expected_version" value="{esc(fulfillment.get('version'))}">
+        <input type="hidden" name="amount" value="{esc(fulfillment.get('expected_amount') or order.get('total'))}">
+        <input type="hidden" name="next_url" value="{esc(next_url)}">
+        <button class="button warn" type="submit">💵 Confirmar cobro {money(fulfillment.get('expected_amount') or order.get('total'))}</button>
+      </form>
+    """
+
+
+def payment_gate_callout(order: Dict[str, Any], completing: bool = False) -> str:
+    reason = payment_gate_reason(order, completing=completing)
+    if not reason:
+        return f'<div class="list-item" style="border-color:#166534">{payment_fulfillment_badge(order)} <strong style="display:inline">Pago habilitado para logística</strong></div>'
+    return f'<div class="warning"><strong>Bloqueo de pago:</strong> {esc(reason)} <a href="{esc(payment_proof_review_url())}" target="_blank">Abrir Caja</a></div>'
+
+
+def logistics_exception_reasons(order: Dict[str, Any]) -> List[str]:
+    state = str(order.get("estado") or "").upper()
+    if state in {"ENTREGADO", "ANULADO", "CANCELLED", "CANCELADO"}:
+        return []
+    reasons: List[str] = []
+    if not payment_dispatch_allowed(order):
+        reasons.append("Pago sin liberar")
+    if not is_pickup_fulfillment(order) and not str(order.get("direccion_confirmada") or "").strip():
+        reasons.append("Dirección sin confirmar")
+    assignment = order.get("delivery_assignment") or {}
+    if state == "DESPACHADO" and not is_pickup_fulfillment(order) and not assignment:
+        reasons.append("Despachado sin repartidor")
+    age = age_minutes(order.get("updated_at") or order.get("created_at"))
+    if state in {"CONFIRMADO", "EN_PREPARACION", "DESPACHADO"} and age is not None and age >= 45:
+        reasons.append(f"Sin avance hace {age} min")
+    return reasons
+
 
 def pg_request(method: str, path: str, **kwargs: Any) -> Any:
     url = f"{POSTGREST_BASE_URL}{path}"
@@ -715,6 +806,8 @@ def fetch_dashboard_data(limit: int = DASHBOARD_LIMIT) -> Dict[str, Any]:
     reservation_by_num = {row.get("pedido_num"): row for row in reservations if row.get("pedido_num")}
     email_by_pedido = {row.get("pedido_id"): row for row in email_logs if row.get("pedido_id") is not None}
     kitchen_by_pedido: Dict[Any, Dict[str, Any]] = {}
+    fulfillment_by_pedido: Dict[Any, Dict[str, Any]] = {}
+    assignment_by_pedido: Dict[Any, Dict[str, Any]] = {}
     order_ids = [str(order.get("id")) for order in orders if order.get("id") is not None]
     if order_ids:
         try:
@@ -726,11 +819,34 @@ def fetch_dashboard_data(limit: int = DASHBOARD_LIMIT) -> Dict[str, Any]:
         except Exception:
             # Older DB snapshots may not have kitchen columns; keep logistics usable.
             kitchen_by_pedido = {}
+        try:
+            fulfillment_rows = pg_get(
+                "/v_payment_fulfillments?select=id,pedido_id,status,payment_method,expected_amount,received_amount,refunded_amount,version,updated_at"
+                f"&pedido_id=in.({','.join(order_ids)})"
+            )
+            fulfillment_by_pedido = {row.get("pedido_id"): row for row in fulfillment_rows if row.get("pedido_id") is not None}
+        except Exception:
+            fulfillment_by_pedido = {}
+        try:
+            assignment_rows = pg_get(
+                "/v_delivery_asignaciones?select=id,pedido_id,status,repartidor_id,repartidor_codigo,repartidor_nombre,driver_location_at,updated_at"
+                f"&pedido_id=in.({','.join(order_ids)})&status=in.(OFFERED,ACCEPTED,ASSIGNED)"
+                "&order=id.desc"
+            )
+            for row in assignment_rows:
+                pedido_id = row.get("pedido_id")
+                if pedido_id is not None and pedido_id not in assignment_by_pedido:
+                    assignment_by_pedido[pedido_id] = row
+        except Exception:
+            assignment_by_pedido = {}
 
     orders_enriched: List[Dict[str, Any]] = []
     for order in orders:
         merged = dict(order)
         merged.update(kitchen_by_pedido.get(order.get("id"), {}))
+        merged["payment_fulfillment"] = fulfillment_by_pedido.get(order.get("id"))
+        merged["delivery_assignment"] = assignment_by_pedido.get(order.get("id"))
+        merged["logistics_exceptions"] = logistics_exception_reasons(merged)
         merged["reservation"] = reservation_by_num.get(order.get("pedido_num"))
         merged["email_log"] = email_by_pedido.get(order.get("id"))
         merged["human_handoff"] = handoffs.get(clean_phone_digits(order.get("whatsapp_number")))
@@ -876,6 +992,10 @@ def filter_dashboard_data(
         conversations = [c for c in conversations if c.get("estado") in {"WAITING_ADDRESS_CONFIRMATION", "WAITING_PAYMENT_AND_LOCATION", "ASKING_NAME_AND_ITEMS"}]
         orders = [o for o in orders if (o.get("email_log") or {}).get("status") in {"PENDING", "ERROR"} or o.get("estado") in {"CONFIRMADO", "EN_PREPARACION", "DESPACHADO"}]
         email_logs = [e for e in email_logs if e.get("status") in {"PENDING", "ERROR"}]
+    elif view == "exceptions":
+        orders = [o for o in orders if o.get("logistics_exceptions")]
+        conversations = []
+        email_logs = []
     elif view == "live":
         orders = [o for o in orders if o.get("estado") in {"CONFIRMADO", "EN_PREPARACION", "DESPACHADO"}]
         conversations = [c for c in conversations if c.get("estado") not in {"CONFIRMED", "ANULADO", "CANCELLED"}]
@@ -950,14 +1070,15 @@ def render_dashboard_page(
     urgent_emails = [e for e in data["email_logs"] if e.get("status") in {"ERROR", "PENDING"}][:5]
     dispatch_orders = [o for o in data["orders"] if o.get("estado") in {"CONFIRMADO", "EN_PREPARACION", "DESPACHADO"}][:6]
     handoff_active = len([c for c in data["conversations"] if isinstance(c.get("human_handoff"), dict)])
-    cash_orders = len([o for o in data["orders"] if str(o.get("metodo_pago") or "").upper() in {"EFECTIVO", "CASH"}])
+    cash_orders = len([o for o in data["orders"] if str(o.get("metodo_pago") or "").upper() in {"EFECTIVO", "CASH", "CONTRA_ENTREGA"}])
+    exception_orders = [o for o in data["orders"] if o.get("logistics_exceptions")]
 
     cards = [
         ("Pedidos recientes", summary["orders_total"]),
         ("Confirmados", summary["orders_confirmed"]),
         ("En operación", summary["orders_in_progress"]),
         ("Handoff humano", summary["human_handoffs"]),
-        ("Emails pendientes", summary["emails_pending"]),
+        ("Excepciones", len(exception_orders)),
     ]
     card_html = "".join(
         f'<div class="summary-card"><div class="k">{esc(label)}</div><div class="v">{esc(value)}</div></div>'
@@ -968,6 +1089,7 @@ def render_dashboard_page(
     filter_counts = {
         "all": len(search_scoped["orders"]) + len(search_scoped["conversations"]) + len(search_scoped["email_logs"]),
         "attention": len([c for c in search_scoped["conversations"] if c.get("estado") in {"WAITING_ADDRESS_CONFIRMATION", "WAITING_PAYMENT_AND_LOCATION", "ASKING_NAME_AND_ITEMS"}]) + len([o for o in search_scoped["orders"] if (o.get("email_log") or {}).get("status") in {"PENDING", "ERROR"} or o.get("estado") in {"CONFIRMADO", "EN_PREPARACION", "DESPACHADO"}]) + len([e for e in search_scoped["email_logs"] if e.get("status") in {"PENDING", "ERROR"}]),
+        "exceptions": len([o for o in search_scoped["orders"] if o.get("logistics_exceptions")]),
         "live": len([o for o in search_scoped["orders"] if o.get("estado") in {"CONFIRMADO", "EN_PREPARACION", "DESPACHADO"}]) + len([c for c in search_scoped["conversations"] if c.get("estado") not in {"CONFIRMED", "ANULADO", "CANCELLED"}]),
         "orders": len(search_scoped["orders"]),
         "conversations": len(search_scoped["conversations"]),
@@ -976,6 +1098,7 @@ def render_dashboard_page(
     filters = [
         ("all", "Todo"),
         ("attention", "Atención"),
+        ("exceptions", "Excepciones"),
         ("live", "Operación viva"),
         ("orders", "Pedidos"),
         ("conversations", "Conversaciones"),
@@ -993,7 +1116,7 @@ def render_dashboard_page(
         ("Picking", len([o for o in data["orders"] if order_workflow_stage(o) == "picking"]), "Listos para preparar/recolectar"),
         ("Delivery", len([o for o in data["orders"] if order_workflow_stage(o) == "delivery"]), "Despachados, ruta o recojo cliente"),
         ("Handoff humano", handoff_active, "Clientes con bot pausado"),
-        ("Cobro efectivo", cash_orders, "Pedidos donde el repartidor/caja debe cobrar"),
+        ("Cobro contra entrega", cash_orders, "Pedidos donde el repartidor/caja debe cobrar"),
     ]
     workspace_html = "".join(
         f'<div class="workspace-card"><div class="k">{esc(label)}</div><div class="v">{esc(value)}</div><div class="tiny">{esc(detail)}</div></div>'
@@ -1057,7 +1180,7 @@ def render_dashboard_page(
             </div>
           </td>
           <td>{badge_html(order.get('estado'))}</td>
-          <td><div class="stack">{payment_badge_html(order.get('metodo_pago'))}<span class="tiny">Cobro</span></div></td>
+          <td><div class="stack">{payment_badge_html(order.get('metodo_pago'))}{payment_fulfillment_badge(order)}<span class="tiny">{esc(' · '.join(order.get('logistics_exceptions') or []))}</span></div></td>
           <td class="num">{money(order.get('total'))}</td>
           <td>
             <div class="stack">
@@ -1128,6 +1251,10 @@ def render_dashboard_page(
         f'''<div class="list-item"><strong>{esc(o.get("pedido_num"))} · {esc(o.get("cliente_nombre"))}</strong><div style="display:flex;gap:8px;flex-wrap:wrap">{badge_html(o.get("estado"))}{payment_badge_html(o.get("metodo_pago"))}</div><div class="tiny">{money(o.get("total"))} · {esc(trim_text(o.get("direccion_confirmada") or o.get("direccion_detectada"), 70))}</div><div class="actions" style="margin-top:10px">{f'<a class="button" href="{esc(o.get("order_url") or "#")}" target="_blank">Ver pedido</a>' if o.get("order_url") else ''}{f'<form method="post" action="/order/{esc(o.get("pedido_num"))}/status" onsubmit="return confirm(\'¿Limpiar {esc(o.get("pedido_num"))} de Pedidos a mover? Se marcará como ANULADO y saldrá de la cola activa.\');"><input type="hidden" name="token" value="{esc(order_token(o))}"><input type="hidden" name="next_url" value="/dashboard"><button class="button good" name="estado" value="ANULADO">Clear</button></form>' if order_token(o) else ''}</div></div>'''
         for o in dispatch_orders
     ) or '<div class="list-item">Sin pedidos en operación.</div>'
+    exception_list = "".join(
+        f'''<div class="list-item"><strong>{esc(o.get("pedido_num"))} · {esc(o.get("cliente_nombre"))}</strong><div style="display:flex;gap:8px;flex-wrap:wrap">{badge_html(o.get("estado"))}{payment_fulfillment_badge(o)}</div><div class="warning" style="margin-top:8px">{esc(" · ".join(o.get("logistics_exceptions") or []))}</div><div class="actions" style="margin-top:10px">{f'<a class="button" href="{esc(o.get("order_url") or "#")}" target="_blank">Abrir pedido</a>' if o.get("order_url") else ''}<a class="button warn" href="{esc(payment_proof_review_url())}" target="_blank">Pagos</a></div></div>'''
+        for o in exception_orders[:12]
+    ) or '<div class="list-item">Sin excepciones operativas.</div>'
 
     picking_orders = [o for o in data["orders"] if order_workflow_stage(o) == "picking"][:8]
     delivery_orders = [o for o in data["orders"] if order_workflow_stage(o) == "delivery"][:8]
@@ -1179,6 +1306,11 @@ def render_dashboard_page(
       </div>
 
       <div class="grid-cards">{card_html}</div>
+
+      <div class="panel priority-red">
+        <div class="panel-head"><h2>Excepciones operativas ({len(exception_orders)})</h2><div class="panel-sub">Pago, dirección, asignación o pedidos sin avance. Resolver antes del despacho.</div></div>
+        <div class="list">{exception_list}</div>
+      </div>
 
       <div class="panel priority-purple">
         <div class="panel-head">
@@ -1482,7 +1614,7 @@ def render_picking_station_page(data: Dict[str, Any]) -> str:
               <h2>{pedido_num}</h2>
               <div class="station-meta">{esc(order.get('cliente_nombre'))} · {money(order.get('total'))}</div>
             </div>
-            <div class="station-badges">{badge_html(order.get('estado'))}{payment_badge_html(order.get('metodo_pago'))}{stale_html(order.get('created_at'), warn_after=20, danger_after=50)}</div>
+            <div class="station-badges">{badge_html(order.get('estado'))}{payment_badge_html(order.get('metodo_pago'))}{payment_fulfillment_badge(order)}{stale_html(order.get('created_at'), warn_after=20, danger_after=50)}</div>
           </div>
           <div class="station-grid">
             <div>
@@ -1497,6 +1629,7 @@ def render_picking_station_page(data: Dict[str, Any]) -> str:
                 <div><span>Dirección</span><strong>{esc(trim_text(order.get('direccion_confirmada') or order.get('direccion_detectada'), 120))}</strong></div>
               </div>
               {notes_html}
+              {payment_gate_callout(order)}
               <div class="actions station-actions">
                 <a class="button" href="/ops/picking/{pedido_num}?token={quote(token, safe='')}">Abrir pedido</a>
                 <a class="button secondary" href="{esc(maps_url)}" target="_blank">Maps</a>
@@ -1836,7 +1969,7 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
               <div class="station-meta">{esc(order.get('cliente_nombre'))} · {money(order.get('total'))}</div>
               <div class="delivery-progress">{progress_html}</div>
             </div>
-            <div class="station-badges">{badge_html(order.get('estado'))}{payment_badge_html(order.get('metodo_pago'))}{badge_html(assignment_status)}{stale_html(order.get('updated_at') or order.get('created_at'), warn_after=20, danger_after=50)}</div>
+            <div class="station-badges">{badge_html(order.get('estado'))}{payment_badge_html(order.get('metodo_pago'))}{payment_fulfillment_badge(order)}{badge_html(assignment_status)}{stale_html(order.get('updated_at') or order.get('created_at'), warn_after=20, danger_after=50)}</div>
           </div>
           <div class="station-grid">
             <div>
@@ -1855,6 +1988,8 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
                 <div><span>Referencia</span><strong>{esc(order.get('referencia') or 'Sin referencia')}</strong></div>
               </div>
               {notes_html}
+              {payment_gate_callout(order, completing=True)}
+              {cod_collection_form(order)}
             </div>
             <div>
               <h3>Resumen del pedido</h3>
@@ -2046,6 +2181,8 @@ def render_delivery_page(data: Dict[str, Any], token: str) -> str:
 
       <div class="panel">
         <div class="panel-head"><h2>Acciones de delivery</h2></div>
+        {payment_gate_callout(order, completing=True)}
+        {cod_collection_form(order, f'/ops/delivery/{pedido_num}?token={quote(token, safe="")}')}
         <form method="post" action="/order/{pedido_num}/status" class="actions">
           <input type="hidden" name="token" value="{esc(token)}">
           <input type="hidden" name="next_url" value="/ops/delivery/{pedido_num}?token={quote(token, safe='')}">
@@ -2820,7 +2957,11 @@ def fetch_public_order(pedido_num: str, token: str) -> Dict[str, Any]:
         rows = pg_get(f"/pedidos?id=eq.{int(pedido_id)}&select=payment_status,payment_proof_required&limit=1")
         if rows:
             order.update(rows[0])
-            data["order"] = order
+        try:
+            order["payment_fulfillment"] = fetch_payment_fulfillment(pedido_id)
+        except Exception:
+            order["payment_fulfillment"] = None
+        data["order"] = order
     return data
 
 
@@ -3129,10 +3270,14 @@ def delivery_page(pedido_num: str, token: str = Query(...)) -> HTMLResponse:
 
 @app.post("/ops/delivery/offer-next")
 def delivery_offer_next(pedido_num: str = Form(...)) -> RedirectResponse:
-    rows = pg_get(f"/v_pedidos_logistica?pedido_num=eq.{quote(pedido_num, safe='')}&select=id&limit=1")
+    rows = pg_get(f"/v_pedidos_logistica?pedido_num=eq.{quote(pedido_num, safe='')}&select=id,pedido_num,metodo_pago&limit=1")
     if not rows:
         raise HTTPException(status_code=404, detail="Pedido not found")
-    data = pg_rpc("ofrecer_delivery_a_siguiente_repartidor", {"p_pedido_id": rows[0]["id"]})
+    order = rows[0]
+    order["payment_fulfillment"] = fetch_payment_fulfillment(order["id"])
+    if not payment_dispatch_allowed(order):
+        raise HTTPException(status_code=409, detail=payment_gate_reason(order))
+    data = pg_rpc("ofrecer_delivery_a_siguiente_repartidor", {"p_pedido_id": order["id"]})
     if not data.get("ok"):
         raise HTTPException(status_code=409, detail=data)
     return RedirectResponse(url="/ops/delivery", status_code=303)
@@ -3142,11 +3287,14 @@ def delivery_offer_next(pedido_num: str = Form(...)) -> RedirectResponse:
 def delivery_assign_driver(pedido_num: str = Form(...), repartidor_id: int = Form(...)) -> RedirectResponse:
     orders = pg_get(
         f"/v_pedidos_logistica?pedido_num=eq.{quote(pedido_num, safe='')}"
-        "&select=id,pedido_num,direccion_confirmada,direccion_detectada,maps_url&limit=1"
+        "&select=id,pedido_num,metodo_pago,direccion_confirmada,direccion_detectada,maps_url&limit=1"
     )
     if not orders:
         raise HTTPException(status_code=404, detail="Pedido not found")
     order = orders[0]
+    order["payment_fulfillment"] = fetch_payment_fulfillment(order["id"])
+    if not payment_dispatch_allowed(order):
+        raise HTTPException(status_code=409, detail=payment_gate_reason(order))
     drivers = pg_get(f"/repartidores?id=eq.{repartidor_id}&activo=eq.true&limit=1")
     if not drivers:
         raise HTTPException(status_code=404, detail="Repartidor activo no encontrado")
@@ -3209,6 +3357,40 @@ def delivery_assign_driver(pedido_num: str = Form(...), repartidor_id: int = For
     if not created:
         raise HTTPException(status_code=500, detail="No se pudo crear la asignacion")
     return RedirectResponse(url="/ops/delivery#lane-assigned", status_code=303)
+
+
+@app.post("/ops/delivery/collect-cod")
+def delivery_collect_cod(
+    pedido_id: int = Form(...),
+    expected_version: int = Form(...),
+    amount: float = Form(...),
+    next_url: str = Form("/ops/delivery"),
+) -> RedirectResponse:
+    orders = pg_get(f"/v_pedidos_logistica?id=eq.{pedido_id}&select=id,pedido_num,metodo_pago,total&limit=1")
+    if not orders:
+        raise HTTPException(status_code=404, detail="Pedido not found")
+    order = orders[0]
+    if str(order.get("metodo_pago") or "").upper() != "CONTRA_ENTREGA":
+        raise HTTPException(status_code=409, detail="El pedido no es contra entrega")
+    fulfillment = fetch_payment_fulfillment(pedido_id) or {}
+    if str(fulfillment.get("status") or "").upper() != "COD_DUE":
+        raise HTTPException(status_code=409, detail="El cobro ya cambió de estado; actualiza la pantalla")
+    expected_amount = money_value(fulfillment.get("expected_amount") or order.get("total"))
+    if abs(money_value(amount) - expected_amount) > 0.009:
+        raise HTTPException(status_code=409, detail="El monto cobrado no coincide con el total esperado")
+    pg_rpc("transition_payment_fulfillment", {
+        "p_pedido_id": pedido_id,
+        "p_to_status": "COD_COLLECTED",
+        "p_actor": "logistics",
+        "p_note": "Cobro contra entrega confirmado desde Logistics",
+        "p_amount": amount,
+        "p_expected_version": expected_version,
+        "p_source": "logistics_ui",
+        "p_source_reference": str(order.get("pedido_num") or pedido_id),
+        "p_metadata": {"channel": "delivery_station"},
+    })
+    target = next_url if next_url.startswith("/") else "/ops/delivery"
+    return RedirectResponse(url=target, status_code=303)
 
 
 @app.post("/ops/delivery/assignment-cancel")
@@ -3420,12 +3602,19 @@ def update_status(
     estado: str = Form(...),
     next_url: str = Form(""),
 ):
+    order_data = fetch_public_order(pedido_num, token)
+    order = order_data.get("order") or {}
+    target_status = estado.strip().upper()
+    if target_status == "DESPACHADO" and not payment_dispatch_allowed(order):
+        raise HTTPException(status_code=409, detail=payment_gate_reason(order))
+    if target_status == "ENTREGADO" and not payment_delivery_completion_allowed(order):
+        raise HTTPException(status_code=409, detail=payment_gate_reason(order, completing=True))
     data = pg_rpc(
         "actualizar_estado_pedido_publico",
         {
             "p_pedido_num": pedido_num,
             "p_token": token,
-            "p_estado": estado,
+            "p_estado": target_status,
         },
     )
 

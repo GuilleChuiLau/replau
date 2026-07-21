@@ -30,3 +30,11 @@ The images are illustrative menu photography based on product names, not
 photographs of the restaurant's exact prepared items. Replace individual files
 with real photography later when available, keeping the `product-ID.webp`
 filename convention and rerunning `install_generated_product_images.sh`.
+
+## Natural side-order revision
+
+Products 16–19 (small/large fries and onion rings) were regenerated to reduce
+the CGI appearance. Fries use irregular lengths, bends, browned edges, visible
+salt, and random loose distribution. Onion rings use varied diameters,
+imperfect circles, uneven hand-breaded texture, toasted color variation, and
+natural crumbs/overlaps. The revised assets remain 600×600 WebP files.

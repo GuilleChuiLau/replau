@@ -213,6 +213,11 @@ def check_reliability_observability(gate: Gate) -> None:
     gate.run("Reliability observability tests", [sys.executable, str(test_file)], timeout=30)
 
 
+def check_logistics_payment_gates(gate: Gate) -> None:
+    test_file = ROOT / "replau_logistics_viewer/test_logistics_payment_gates.py"
+    gate.run("Logistics payment gate contract", [sys.executable, str(test_file)], timeout=30)
+
+
 def check_source_deploy_drift(gate: Gate) -> None:
     for pair in DEPLOY_PAIRS:
         if not pair.source.exists():
@@ -332,6 +337,7 @@ def main() -> int:
     check_python_compile(gate)
     check_payment_fulfillment_contract(gate)
     check_reliability_observability(gate)
+    check_logistics_payment_gates(gate)
     if not args.skip_deploy_drift:
         check_source_deploy_drift(gate)
     if args.require_clean_git:
