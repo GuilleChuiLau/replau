@@ -52,6 +52,12 @@ prevent two cashiers from acting on stale state.
 OCR remains advisory. `VERIFIED` still requires a cashier decision unless a
 future authoritative provider reconciliation integration supplies the decision.
 
+The cashier workspace links each proof to its fulfillment ledger. The ledger
+page shows expected, received, and refunded amounts; the immutable event
+timeline; and only the next transitions allowed by the current state. Every
+submission includes the displayed version, so a stale cashier screen cannot
+overwrite a newer decision.
+
 ## Install
 
 ```bash

@@ -264,6 +264,59 @@ def money(value: Any) -> str:
         return "S/ 0.00"
 
 
+FULFILLMENT_ACTIONS = {
+    "VERIFIED": [("RELEASED", "Release order"), ("RECONCILED", "Reconcile payment"), ("REFUND_PENDING", "Start refund")],
+    "RELEASED": [("RECONCILED", "Reconcile payment"), ("REFUND_PENDING", "Start refund")],
+    "COD_DUE": [("COD_COLLECTED", "Confirm COD collection"), ("CANCELLED", "Cancel collection")],
+    "COD_COLLECTED": [("RECONCILED", "Reconcile collection"), ("REFUND_PENDING", "Start refund")],
+    "RECONCILED": [("SETTLED", "Settle payment"), ("REFUND_PENDING", "Start refund")],
+    "SETTLED": [("REFUND_PENDING", "Start refund")],
+    "REFUND_PENDING": [("PARTIALLY_REFUNDED", "Record partial refund"), ("REFUNDED", "Record full refund")],
+    "PARTIALLY_REFUNDED": [("REFUND_PENDING", "Continue refund")],
+}
+
+
+def get_fulfillment(pedido_id: int) -> Optional[Dict[str, Any]]:
+    rows = pg_get(f"/v_payment_fulfillments?pedido_id=eq.{pedido_id}&limit=1")
+    return rows[0] if rows else None
+
+
+def get_fulfillment_events(pedido_id: int) -> list[Dict[str, Any]]:
+    return pg_get(f"/payment_fulfillment_events?pedido_id=eq.{pedido_id}&order=id.desc&limit=100")
+
+
+def fulfillment_actions(status: Any) -> list[tuple[str, str]]:
+    return FULFILLMENT_ACTIONS.get(str(status or "").upper(), [])
+
+
+def fulfillment_badge(status: Any) -> str:
+    value = str(status or "NOT_CREATED").upper()
+    return f'<span class="pill {esc(value)}">{esc(value)}</span>'
+
+
+def fulfillment_timeline(events: list[Dict[str, Any]]) -> str:
+    if not events:
+        return '<p class="muted">No fulfillment events recorded.</p>'
+    rows = ""
+    for event in events:
+        transition = f"{event.get('from_status') or '—'} → {event.get('to_status') or '—'}"
+        rows += f"""
+          <tr>
+            <td>{esc(event.get('created_at'))}</td>
+            <td><strong>{esc(event.get('event_type'))}</strong><br><span class="muted">{esc(transition)}</span></td>
+            <td>{esc(event.get('actor'))}<br><span class="muted">{esc(event.get('source'))}</span></td>
+            <td>{money(event.get('amount')) if event.get('amount') is not None else '—'}</td>
+            <td>{esc(event.get('note'))}</td>
+          </tr>
+        """
+    return f"""
+      <table>
+        <thead><tr><th>Time</th><th>Event</th><th>Actor/source</th><th>Amount</th><th>Note</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    """
+
+
 def check_row(label: str, value: Any, pass_text: str, fail_text: str, unknown_text: str) -> str:
     if value is True:
         css, text = "check-pass", pass_text
@@ -328,12 +381,15 @@ def index(request: Request, status: str = "ALL", flash: str = "", x_review_token
     verified = [r for r in all_rows if str(r.get("status") or "").upper() == "VERIFIED"]
     rejected = [r for r in all_rows if str(r.get("status") or "").upper() == "REJECTED"]
     pending_value = sum(float(r.get("total") or 0) for r in received)
+    fulfillment_rows = pg_get("/v_payment_fulfillments?select=pedido_id,status,version&limit=1000")
+    fulfillment_by_order = {int(r["pedido_id"]): r for r in fulfillment_rows if r.get("pedido_id") is not None}
     auth_suffix = ("&" + token_query(request)[1:]) if token_query(request) else ""
 
     tr = ""
     for r in rows:
         st = esc(r.get("status"))
         proof_id = r.get("id")
+        fulfillment = fulfillment_by_order.get(int(r.get("pedido_id") or 0), {})
         saved_file_action = (
             f'<a href="{esc(proof_view_link(proof_id, request))}" target="_blank">View submitted file</a>'
             if r.get("local_path")
@@ -344,11 +400,12 @@ def index(request: Request, status: str = "ALL", flash: str = "", x_review_token
           <td>{esc(proof_id)}</td>
           <td><strong>{esc(r.get('pedido_num'))}</strong><br><span class="muted">pedido_id={esc(r.get('pedido_id'))}</span></td>
           <td>{esc(r.get('cliente_nombre'))}<br>{esc(r.get('whatsapp_number'))}</td>
-          <td>S/ {esc(r.get('total'))}<br><span class="muted">{esc(r.get('payment_status'))}</span></td>
+          <td>S/ {esc(r.get('total'))}<br><span class="muted">{esc(r.get('payment_status'))}</span><br>{fulfillment_badge(fulfillment.get('status'))}</td>
           <td>{media_html(r)}<br><span class="muted">{esc(r.get('caption'))}</span></td>
           <td><span class="pill {st}">{st}</span><br>{esc(r.get('created_at'))}</td>
           <td>
             <a href="/proof/{esc(proof_id)}{token_query(request)}">Review</a><br>
+            <a href="/fulfillment/{esc(r.get('pedido_id'))}{token_query(request)}">Fulfillment</a><br>
             {saved_file_action}
           </td>
         </tr>
@@ -441,6 +498,7 @@ def proof_detail(proof_id: int, request: Request, flash: str = "", x_review_toke
         <p><strong>Total:</strong> S/ {esc(r.get('total'))}</p>
         <p><strong>Payment status:</strong> {esc(r.get('payment_status'))}</p>
         <p><strong>Proof status:</strong> <span class="pill {esc(r.get('status'))}">{esc(r.get('status'))}</span></p>
+        <p><a href="/fulfillment/{esc(r.get('pedido_id'))}{token_query(request)}">Open payment fulfillment ledger</a></p>
         <p><strong>Caption:</strong><br>{esc(r.get('caption'))}</p>
         <p><strong>Created:</strong> {esc(r.get('created_at'))}</p>
       </div>
@@ -489,6 +547,87 @@ def review_proof(proof_id: int, request: Request, status: str = Form(...), verif
     # Return to the full grid so the reviewed row remains visible and shows
     # its new VERIFIED/REJECTED/CANCELLED state after refresh.
     return RedirectResponse(url=with_token("/?status=ALL&flash=Proof+reviewed", request), status_code=303)
+
+
+@app.get("/fulfillment/{pedido_id}", response_class=HTMLResponse)
+def fulfillment_detail(pedido_id: int, request: Request, flash: str = "", x_review_token: Optional[str] = Header(default=None, alias="X-Review-Token")) -> HTMLResponse:
+    check_auth(request, x_review_token)
+    row = get_fulfillment(pedido_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Payment fulfillment not found")
+    events = get_fulfillment_events(pedido_id)
+    actions = fulfillment_actions(row.get("status"))
+    action_forms = ""
+    for target, label in actions:
+        amount_required = target in {"PARTIALLY_REFUNDED", "REFUNDED"}
+        amount_field = (
+            '<label>Refund amount</label><input name="amount" type="number" min="0.01" step="0.01" required>'
+            if amount_required else
+            '<label>Amount (optional)</label><input name="amount" type="number" min="0.01" step="0.01">'
+        )
+        action_forms += f"""
+          <form class="card" method="post" action="/fulfillment/{pedido_id}/transition{token_query(request)}">
+            <h3>{esc(label)}</h3>
+            <input type="hidden" name="to_status" value="{esc(target)}">
+            <input type="hidden" name="expected_version" value="{esc(row.get('version'))}">
+            <label>Actor</label><input name="actor" value="cashier" required>
+            {amount_field}
+            <label>Note</label><textarea name="note" placeholder="Reason or reconciliation reference"></textarea>
+            <button type="submit" onclick="return confirm('Confirm {esc(label)}?')">{esc(label)}</button>
+          </form>
+        """
+    body = f"""
+      <div class="card">
+        <h2>{esc(row.get('pedido_num'))} · Payment fulfillment</h2>
+        <div class="kpi-grid">
+          <div class="kpi"><span>Status</span><strong style="font-size:18px">{fulfillment_badge(row.get('status'))}</strong></div>
+          <div class="kpi"><span>Expected</span><strong>{money(row.get('expected_amount'))}</strong></div>
+          <div class="kpi"><span>Received</span><strong>{money(row.get('received_amount'))}</strong></div>
+          <div class="kpi"><span>Refunded</span><strong>{money(row.get('refunded_amount'))}</strong></div>
+        </div>
+        <p><strong>Method:</strong> {esc(row.get('payment_method'))} · <strong>Order state:</strong> {esc(row.get('pedido_estado'))}</p>
+        <p><strong>Legacy payment state:</strong> {esc(row.get('legacy_payment_status'))} · <strong>Version:</strong> {esc(row.get('version'))}</p>
+        <p><strong>Last action:</strong> {esc(row.get('last_actor'))} — {esc(row.get('last_note'))}</p>
+      </div>
+      <div class="grid">{action_forms or '<div class="card"><p class="muted">No manual transition is available from this state.</p></div>'}</div>
+      <div class="card"><h2>Immutable audit timeline</h2>{fulfillment_timeline(events)}</div>
+      <p><a href="/{token_query(request)}">Back to cashier workspace</a></p>
+    """
+    return layout(f"Payment Fulfillment {row.get('pedido_num')}", body, flash=flash, auth_query=token_query(request))
+
+
+@app.post("/fulfillment/{pedido_id}/transition")
+def fulfillment_transition(
+    pedido_id: int,
+    request: Request,
+    to_status: str = Form(...),
+    actor: str = Form(...),
+    note: str = Form(""),
+    amount: str = Form(""),
+    expected_version: int = Form(...),
+    x_review_token: Optional[str] = Header(default=None, alias="X-Review-Token"),
+) -> RedirectResponse:
+    check_auth(request, x_review_token)
+    allowed_targets = {target for target, _ in fulfillment_actions((get_fulfillment(pedido_id) or {}).get("status"))}
+    target = to_status.strip().upper()
+    if target not in allowed_targets:
+        raise HTTPException(status_code=409, detail="Transition is not available from the current state")
+    try:
+        parsed_amount = float(amount) if amount.strip() else None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid amount") from exc
+    pg_rpc("transition_payment_fulfillment", {
+        "p_pedido_id": pedido_id,
+        "p_to_status": target,
+        "p_actor": actor.strip(),
+        "p_note": note.strip() or None,
+        "p_amount": parsed_amount,
+        "p_expected_version": expected_version,
+        "p_source": "cashier_ui",
+        "p_source_reference": None,
+        "p_metadata": {},
+    })
+    return RedirectResponse(url=with_token(f"/fulfillment/{pedido_id}?flash=Payment+fulfillment+updated", request), status_code=303)
 
 
 if __name__ == "__main__":

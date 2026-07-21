@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 SQL = (Path(__file__).with_name("add_payment_fulfillment.sql")).read_text()
+UI = (Path(__file__).with_name("replau_payment_proof_review.py")).read_text()
 
 
 def transition_pairs() -> set[tuple[str, str]]:
@@ -69,6 +70,17 @@ class PaymentFulfillmentMigrationTests(unittest.TestCase):
         self.assertIn("ON CONFLICT (pedido_id) DO NOTHING", SQL)
         self.assertIn("DROP TRIGGER IF EXISTS sync_payment_fulfillment_from_order", SQL)
         self.assertIn("CREATE OR REPLACE VIEW api.v_payment_fulfillments", SQL)
+
+    def test_cashier_ui_uses_controlled_versioned_transitions(self) -> None:
+        for marker in (
+            'FULFILLMENT_ACTIONS = {',
+            '@app.get("/fulfillment/{pedido_id}"',
+            '@app.post("/fulfillment/{pedido_id}/transition")',
+            '"p_expected_version": expected_version',
+            '"p_source": "cashier_ui"',
+            'Immutable audit timeline',
+        ):
+            self.assertIn(marker, UI)
 
 
 if __name__ == "__main__":
