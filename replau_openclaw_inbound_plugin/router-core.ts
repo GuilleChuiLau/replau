@@ -16,6 +16,11 @@ export function digits(value: unknown): string {
   return String(value ?? "").replace(/\D/g, "");
 }
 
+export function channelIdForAccount(accountId: unknown, fallback = "replau-main"): string {
+  const normalized = String(accountId ?? "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return normalized ? `whatsapp-account:${normalized.slice(0, 80)}` : fallback;
+}
+
 export function isDirectWhatsAppConversation(params: {
   channel?: unknown;
   isGroup?: unknown;

@@ -6,6 +6,7 @@ Adds:
 2. Daily PostgreSQL backup with systemd timer
 3. Stuck WhatsApp/email monitor with systemd timer
 4. WhatsApp gateway watchdog with systemd timer
+5. Private, token-protected list of user-initiated WhatsApp conversation requests
 
 ## Install
 
@@ -41,6 +42,16 @@ Open:
 ```text
 http://127.0.0.1:8793
 ```
+
+Conversation requests:
+
+```text
+http://127.0.0.1:8793/conversation-requests
+```
+
+The queue records only direct chats initiated by the WhatsApp user. It is an
+operations inbox, not a list for unsolicited messages. Repeated inbound
+messages update the same account-scoped record.
 
 ## Config
 

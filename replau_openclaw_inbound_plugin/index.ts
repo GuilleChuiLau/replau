@@ -3,6 +3,7 @@ import { basename } from "node:path";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import {
   DEFAULT_MAX_MEDIA_BYTES,
+  channelIdForAccount,
   digits,
   envValue,
   findMediaPath,
@@ -30,6 +31,7 @@ async function routeToBridge(api: any, data: InboundData): Promise<string> {
   const envFile = String(config.envFile || DEFAULT_ENV_FILE);
   const timeoutMs = Number(config.timeoutMs || 15000);
   const maxMediaBytes = Number(config.maxMediaBytes || DEFAULT_MAX_MEDIA_BYTES);
+  const defaultChannelId = String(config.channelId || "replau-main");
   const mediaPath = await validateMediaPath(
     findMediaPath({ content: data.content, metadata: data.metadata }),
     maxMediaBytes,
@@ -42,7 +44,7 @@ async function routeToBridge(api: any, data: InboundData): Promise<string> {
     whatsapp_number: data.customer,
     customer_address: data.customer,
     channel_kind: "whatsapp",
-    channel_id: "replau-main",
+    channel_id: channelIdForAccount(data.accountId, defaultChannelId),
     account_id: data.accountId || null,
     message_type: mediaPath ? (mediaPath.toLowerCase().endsWith(".pdf") ? "document" : "image") : "text",
     message_text: data.content,

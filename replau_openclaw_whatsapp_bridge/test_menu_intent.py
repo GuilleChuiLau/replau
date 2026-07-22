@@ -27,6 +27,66 @@ class MenuIntentTest(unittest.TestCase):
     def test_does_not_match_unrelated_text(self):
         self.assertFalse(self.bridge.is_menu_request("Quiero dos hamburguesas"))
 
+    def test_registers_user_initiated_request_with_channel_identity(self):
+        inbound = self.bridge.NormalizedWebhook(
+            whatsapp_number="51999999999",
+            customer_address="51999999999",
+            channel_kind="whatsapp",
+            channel_id="whatsapp-account:restaurant-2",
+            account_id="restaurant-2",
+            message_text="Hola, quiero pedir",
+            raw_payload={"message_id": "wamid.123", "sender_name": "Memo"},
+        )
+        identity = self.bridge.conversation_identity_from_inbound(inbound)
+        with patch.object(self.bridge, "pg_post", return_value={"ok": True, "is_new": True}) as post:
+            self.bridge.register_conversation_request(inbound, identity)
+        post.assert_called_once_with(
+            "/rpc/register_whatsapp_conversation_request",
+            {
+                "p_channel_kind": "whatsapp",
+                "p_channel_id": "whatsapp-account:restaurant-2",
+                "p_account_id": "restaurant-2",
+                "p_customer_address": "51999999999",
+                "p_sender_name": "Memo",
+                "p_message_text": "Hola, quiero pedir",
+                "p_provider_message_id": "wamid.123",
+            },
+        )
+
+    def test_queue_failure_does_not_block_customer_ordering(self):
+        inbound = self.bridge.NormalizedWebhook(whatsapp_number="51999999999", message_text="menu")
+        identity = self.bridge.conversation_identity_from_inbound(inbound)
+        with patch.object(self.bridge, "pg_post", side_effect=RuntimeError("queue unavailable")):
+            self.assertIsNone(self.bridge.register_conversation_request(inbound, identity))
+
+    def test_same_phone_uses_distinct_conversation_paths_for_two_accounts(self):
+        first = self.bridge.ConversationIdentity("whatsapp", "whatsapp-account:first", "51999999999", "first")
+        second = self.bridge.ConversationIdentity("whatsapp", "whatsapp-account:second", "51999999999", "second")
+        with patch.object(self.bridge, "pg_get", side_effect=[[{"estado": "NEW"}], [{"estado": "CONFIRMED"}]]) as get:
+            self.assertEqual(self.bridge.get_conversation(first)["estado"], "NEW")
+            self.assertEqual(self.bridge.get_conversation(second)["estado"], "CONFIRMED")
+        self.assertIn("channel_id=eq.whatsapp-account%3Afirst", get.call_args_list[0].args[0])
+        self.assertIn("channel_id=eq.whatsapp-account%3Asecond", get.call_args_list[1].args[0])
+
+    def test_request_context_scopes_legacy_handler_calls(self):
+        identity = self.bridge.ConversationIdentity("whatsapp", "whatsapp-account:second", "51999999999", "second")
+        token = self.bridge.ACTIVE_CONVERSATION_IDENTITY.set(identity)
+        try:
+            with patch.object(self.bridge, "pg_patch", return_value=[{"estado": "NEW"}]) as update:
+                self.bridge.patch_conversation("51999999999", {"estado": "NEW"})
+        finally:
+            self.bridge.ACTIVE_CONVERSATION_IDENTITY.reset(token)
+        self.assertIn("channel_id=eq.whatsapp-account%3Asecond", update.call_args.args[0])
+
+    def test_channel_message_log_includes_composite_identity(self):
+        identity = self.bridge.ConversationIdentity("whatsapp", "whatsapp-account:second", "51999999999", "second")
+        with patch.object(self.bridge, "pg_post", return_value={"ok": True}) as post:
+            self.bridge.log_whatsapp_message(identity, "INBOUND", "text", "hola")
+        self.assertEqual(post.call_args.args[0], "/rpc/registrar_whatsapp_mensaje_canal")
+        payload = post.call_args.args[1]
+        self.assertEqual(payload["p_channel_id"], "whatsapp-account:second")
+        self.assertEqual(payload["p_customer_address"], "51999999999")
+
     def test_reply_contains_public_storefront(self):
         reply = self.bridge.menu_reply_text()
         self.assertIn("Replau Burger", reply)

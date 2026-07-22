@@ -102,6 +102,7 @@ def payment_proof_review_url():
 def erp_nav(req:Request):
     return f'''<div class="erp-nav" aria-label="Replau ERP navigation">
 <a href="/{token_query(req)}">Ops</a>
+<a href="/conversation-requests{token_query(req)}">WhatsApp Requests</a>
 <a href="http://127.0.0.1:8790/dashboard">Logistics</a>
 <a href="http://127.0.0.1:8791/">Kitchen</a>
 <a href="{esc(payment_proof_review_url())}">Payments</a>
@@ -138,6 +139,14 @@ def pg(path):
         r=requests.get(POSTGREST_BASE_URL+path,timeout=REQUEST_TIMEOUT); r.raise_for_status()
         return {"ok":True,"data":r.json()}
     except Exception as e: return {"ok":False,"data":[],"error":f"{type(e).__name__}: {e}"}
+def pg_update(path,payload):
+    try:
+        r=requests.patch(POSTGREST_BASE_URL+path,json=payload,headers={"Prefer":"return=representation"},timeout=REQUEST_TIMEOUT); r.raise_for_status()
+        return {"ok":True,"data":r.json()}
+    except Exception as e: return {"ok":False,"data":[],"error":f"{type(e).__name__}: {e}"}
+def conversation_requests(status=""):
+    status_filter=f"&status=eq.{quote(status,safe='')}" if status else ""
+    return pg("/whatsapp_conversation_requests?select=id,channel_id,account_id,customer_address,sender_name,first_message_text,last_message_text,inbound_count,status,consent_basis,first_inbound_at,last_inbound_at,status_updated_at,status_updated_by"+status_filter+"&order=last_inbound_at.desc&limit=500")
 def restaurant_status():
     default={
         "accepting_orders":True,
@@ -532,6 +541,25 @@ async def update_restaurant_status(req:Request,x_ops_token:Optional[str]=Header(
     customer_message=form.get("customer_message","")
     save_restaurant_status(accepting_orders.lower() in {"true","1","yes","on","open"},reason,customer_message,"ops-dashboard")
     return RedirectResponse(url=with_token("/?flash=Restaurant+status+updated",req),status_code=303)
+@app.get("/api/conversation-requests")
+def api_conversation_requests(req:Request,status:str="",x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
+    auth(req,x_ops_token)
+    if status and status not in {"AUTO_STARTED","IN_PROGRESS","CLOSED","BLOCKED"}:
+        raise HTTPException(400,"Invalid request status")
+    result=conversation_requests(status)
+    if not result["ok"]: raise HTTPException(502,result.get("error") or "Conversation request queue unavailable")
+    return result
+@app.post("/api/conversation-requests/{request_id}/status")
+async def update_conversation_request_status(request_id:int,req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
+    auth(req,x_ops_token)
+    form={k:v[-1] if v else "" for k,v in parse_qs((await req.body()).decode("utf-8"),keep_blank_values=True).items()}
+    status=form.get("status","").upper()
+    if status not in {"AUTO_STARTED","IN_PROGRESS","CLOSED","BLOCKED"}:
+        raise HTTPException(400,"Invalid request status")
+    result=pg_update(f"/whatsapp_conversation_requests?id=eq.{request_id}",{"status":status,"status_updated_at":now(),"status_updated_by":"ops-dashboard"})
+    if not result["ok"]: raise HTTPException(502,result.get("error") or "Could not update request")
+    if not result["data"]: raise HTTPException(404,"Conversation request not found")
+    return RedirectResponse(url=with_token("/conversation-requests?flash=Request+status+updated",req),status_code=303)
 def tbl(rows,cols):
     if not rows: return '<div class="empty">No rows.</div>'
     return "<table><thead><tr>"+"".join(f"<th>{esc(c)}</th>" for c in cols)+"</tr></thead><tbody>"+"".join("<tr>"+"".join(f"<td>{esc(r.get(c))}</td>" for c in cols)+"</tr>" for r in rows)+"</tbody></table>"
@@ -580,6 +608,25 @@ def ingredient_behavior_rows(rows):
         products=", ".join(r.get("linked_products",[])[:3]) or "No linked products"
         parts.append(f'''<div class="metric-row"><div><strong>{esc(r.get("ingredient"))}</strong><div class="muted">{esc(products)}</div></div><div class="right"><strong>{esc(days)}</strong><div class="muted">Stock value {money(r.get("stock_value"))}</div></div></div>''')
     return "".join(parts)
+def request_status_form(row,req):
+    rid=int(row.get("id") or 0)
+    current=str(row.get("status") or "AUTO_STARTED")
+    options="".join(f'<option value="{value}" {"selected" if value==current else ""}>{value.replace("_"," ")}</option>' for value in ("AUTO_STARTED","IN_PROGRESS","CLOSED","BLOCKED"))
+    return f'<form method="post" action="/api/conversation-requests/{rid}/status{token_query(req)}"><select name="status" aria-label="Status for request {rid}">{options}</select><button type="submit">Save</button></form>'
+@app.get("/conversation-requests",response_class=HTMLResponse)
+def conversation_requests_page(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
+    auth(req,x_ops_token)
+    result=conversation_requests()
+    flash=req.query_params.get("flash","")
+    flash_html=f'<div class="flash">{esc(flash)}</div>' if flash else ""
+    if not result["ok"]:
+        rows_html=f'<div class="flash badline">Queue unavailable: {esc(result.get("error"))}</div>'
+    else:
+        rows=[]
+        for row in result["data"]:
+            rows.append(f'''<tr><td>{esc(row.get("last_inbound_at"))}</td><td><strong>{esc(row.get("sender_name") or "Unknown")}</strong><br><span class="muted">{esc(row.get("customer_address"))}</span></td><td>{esc(row.get("channel_id"))}<br><span class="muted">{esc(row.get("account_id") or "default")}</span></td><td>{esc(row.get("first_message_text"))}</td><td>{esc(row.get("last_message_text"))}</td><td>{esc(row.get("inbound_count"))}</td><td>{esc(row.get("consent_basis"))}</td><td>{request_status_form(row,req)}</td></tr>''')
+        rows_html='<table><thead><tr><th>Last inbound</th><th>Customer</th><th>Account</th><th>First message</th><th>Latest message</th><th>Messages</th><th>Consent</th><th>Internal status</th></tr></thead><tbody>'+"".join(rows)+'</tbody></table>' if rows else '<div class="empty">No user-initiated WhatsApp requests yet.</div>'
+    return HTMLResponse(f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>WhatsApp Requests · Replau</title><style>body{{margin:0;background:#0b1120;color:#e5edf7;font-family:Inter,system-ui,sans-serif}}.wrap{{max-width:1480px;margin:auto;padding:22px}}.erp-nav{{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 18px;padding:12px;border:1px solid #334155;border-radius:14px;background:#0b1220}}.erp-nav a{{color:#fff;background:#1f2937;border:1px solid #334155;border-radius:999px;padding:8px 11px;text-decoration:none}}.card{{background:#111827;border:1px solid #334155;border-radius:10px;padding:18px;overflow:auto}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{padding:10px;border-bottom:1px solid #26364a;text-align:left;vertical-align:top;max-width:280px}}th{{color:#a78bfa}}.muted{{color:#94a3b8}}select,button{{padding:8px;border-radius:8px;border:1px solid #475569;background:#020617;color:#e5edf7}}button{{margin-top:6px;background:#374151;cursor:pointer}}.flash{{background:#1e1b4b;border:1px solid #7c3aed;padding:12px;border-radius:8px;margin:12px 0}}.badline{{background:#3f1010;border-color:#ef4444}}@media(max-width:760px){{table{{min-width:1050px}}}}</style></head><body><div class="wrap"><h1>WhatsApp Conversation Requests</h1><p class="muted">Private queue of customers who initiated a direct chat. This is not a cold-outreach list.</p>{erp_nav(req)}{flash_html}<div class="card">{rows_html}</div></div></body></html>''')
 @app.get("/",response_class=HTMLResponse)
 def dash(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
     auth(req,x_ops_token); h=collect(); bsum=business_summary()

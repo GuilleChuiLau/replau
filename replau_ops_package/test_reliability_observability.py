@@ -49,5 +49,17 @@ class BackupVisibilityTests(unittest.TestCase):
         self.assertIn('if EMAIL_NOTIFICATIONS_ENABLED and emails["data"]', DASHBOARD_SOURCE)
 
 
+class ConversationRequestQueueTests(unittest.TestCase):
+    def test_dashboard_keeps_request_queue_private_and_state_bounded(self) -> None:
+        for marker in (
+            '@app.get("/conversation-requests"',
+            'auth(req,x_ops_token)',
+            '"AUTO_STARTED","IN_PROGRESS","CLOSED","BLOCKED"',
+            'This is not a cold-outreach list.',
+            'consent_basis',
+        ):
+            self.assertIn(marker, DASHBOARD_SOURCE)
+
+
 if __name__ == "__main__":
     unittest.main()

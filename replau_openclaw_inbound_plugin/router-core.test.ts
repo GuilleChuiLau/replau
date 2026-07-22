@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   DEFAULT_MAX_MEDIA_BYTES,
+  channelIdForAccount,
   digits,
   envValue,
   findMediaPath,
@@ -17,6 +18,11 @@ test("extracts environment values without exposing unrelated entries", () => {
 
 test("normalizes WhatsApp senders", () => {
   assert.equal(digits("+51 973-875-456@s.whatsapp.net"), "51973875456");
+});
+
+test("creates stable, isolated channel ids for multiple WhatsApp accounts", () => {
+  assert.equal(channelIdForAccount(undefined), "replau-main");
+  assert.equal(channelIdForAccount("Business Account #2"), "whatsapp-account:business-account-2");
 });
 
 test("accepts direct WhatsApp chats and rejects groups or threads", () => {

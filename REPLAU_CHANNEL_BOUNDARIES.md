@@ -169,6 +169,15 @@ After code reads/writes channel identity:
 - update registrar/confirm/customer RPCs to accept channel fields
 - stop relying on `whatsapp_number UNIQUE`
 
+Implementation note: the rollout uses the additive
+`api.whatsapp_conversation_states` table as the bridge source of truth. This
+provides composite account isolation without dropping the proven legacy tables
+or rewriting the order-confirmation transaction in place. The bridge binds the
+active identity for the whole inbound request, so older handlers that still
+pass a phone string resolve to the correct account-scoped record. Customer
+order history remains shared for the same restaurant; mutable conversation
+drafts and message logs are account-scoped.
+
 ### Phase 4 — add second WhatsApp channel
 
 Only after Phase 3:

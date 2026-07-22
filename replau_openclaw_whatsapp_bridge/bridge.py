@@ -17,6 +17,7 @@ import base64
 import hashlib
 import mimetypes
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -141,12 +142,24 @@ class ConversationIdentity:
 
 
 IdentityLike = Union[str, ConversationIdentity]
+ACTIVE_CONVERSATION_IDENTITY: ContextVar[Optional[ConversationIdentity]] = ContextVar(
+    "replau_active_conversation_identity", default=None
+)
 
 
 def legacy_whatsapp_number(identity: IdentityLike) -> str:
     if isinstance(identity, ConversationIdentity):
         return identity.legacy_whatsapp_number
     return str(identity).strip()
+
+
+def scoped_identity(identity: IdentityLike) -> ConversationIdentity:
+    if isinstance(identity, ConversationIdentity):
+        return identity
+    active = ACTIVE_CONVERSATION_IDENTITY.get()
+    if active and active.customer_address == str(identity).strip():
+        return active
+    return ConversationIdentity(CHANNEL_KIND, CHANNEL_ID, str(identity).strip(), CHANNEL_ACCOUNT_ID)
 
 
 def conversation_identity_from_inbound(inbound: "NormalizedWebhook") -> ConversationIdentity:
@@ -301,14 +314,17 @@ def log_whatsapp_message(
     longitude: Optional[float] = None,
     raw_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
-    whatsapp_number = legacy_whatsapp_number(identity)
-    if isinstance(identity, ConversationIdentity):
-        raw_payload = dict(raw_payload or {})
-        raw_payload.setdefault("_replau_channel_identity", identity.as_metadata())
+    scoped = scoped_identity(identity)
+    whatsapp_number = scoped.customer_address
+    raw_payload = dict(raw_payload or {})
+    raw_payload.setdefault("_replau_channel_identity", scoped.as_metadata())
     pg_post(
-        "/rpc/registrar_whatsapp_mensaje",
+        "/rpc/registrar_whatsapp_mensaje_canal",
         {
-            "p_whatsapp_number": whatsapp_number,
+            "p_channel_kind": scoped.channel_kind,
+            "p_channel_id": scoped.channel_id,
+            "p_account_id": scoped.account_id,
+            "p_customer_address": whatsapp_number,
             "p_direction": direction,
             "p_message_type": message_type,
             "p_message_text": message_text,
@@ -319,9 +335,34 @@ def log_whatsapp_message(
     )
 
 
+def register_conversation_request(inbound: NormalizedWebhook, identity: ConversationIdentity) -> Optional[Dict[str, Any]]:
+    """Record a user-initiated direct chat without making ordering depend on the staff queue."""
+    raw = inbound.raw_payload or {}
+    try:
+        result = pg_post(
+            "/rpc/register_whatsapp_conversation_request",
+            {
+                "p_channel_kind": identity.channel_kind,
+                "p_channel_id": identity.channel_id,
+                "p_account_id": identity.account_id,
+                "p_customer_address": identity.customer_address,
+                "p_sender_name": raw.get("sender_name"),
+                "p_message_text": inbound.message_text,
+                "p_provider_message_id": raw.get("message_id"),
+            },
+        )
+        if isinstance(result, dict) and result.get("is_new"):
+            logging.info("Registered new user-initiated WhatsApp request id=%s channel=%s", result.get("request_id"), identity.channel_id)
+        return result if isinstance(result, dict) else None
+    except Exception as exc:
+        logging.warning("Could not update WhatsApp conversation request queue: %s", exc)
+        return None
+
+
 def get_conversation(identity: IdentityLike) -> Optional[Dict[str, Any]]:
-    safe_number = quote(legacy_whatsapp_number(identity), safe="")
-    rows = pg_get(f"/whatsapp_conversaciones?whatsapp_number=eq.{safe_number}&select=*&limit=1")
+    scoped = scoped_identity(identity)
+    safe_kind, safe_channel, safe_number = (quote(value, safe="") for value in (scoped.channel_kind, scoped.channel_id, scoped.customer_address))
+    rows = pg_get(f"/whatsapp_conversation_states?channel_kind=eq.{safe_kind}&channel_id=eq.{safe_channel}&customer_address=eq.{safe_number}&select=*&limit=1")
     return rows[0] if rows else None
 
 
@@ -338,8 +379,9 @@ def get_customer_by_whatsapp(identity: IdentityLike) -> Optional[Dict[str, Any]]
 
 
 def patch_conversation(identity: IdentityLike, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    safe_number = quote(legacy_whatsapp_number(identity), safe="")
-    rows = pg_patch(f"/whatsapp_conversaciones?whatsapp_number=eq.{safe_number}", payload)
+    scoped = scoped_identity(identity)
+    safe_kind, safe_channel, safe_number = (quote(value, safe="") for value in (scoped.channel_kind, scoped.channel_id, scoped.customer_address))
+    rows = pg_patch(f"/whatsapp_conversation_states?channel_kind=eq.{safe_kind}&channel_id=eq.{safe_channel}&customer_address=eq.{safe_number}", payload)
     return rows[0] if rows else None
 
 
@@ -3168,8 +3210,9 @@ def handle_driver_message(inbound: NormalizedWebhook, driver: Dict[str, Any]) ->
     return reply("", next_state="DRIVER_HANDLED", driver=True, dispatch=result)
 
 
-def route_message(inbound: NormalizedWebhook) -> Dict[str, Any]:
+def _route_message_scoped(inbound: NormalizedWebhook) -> Dict[str, Any]:
     identity = conversation_identity_from_inbound(inbound)
+    register_conversation_request(inbound, identity)
     log_whatsapp_message(
         identity,
         "INBOUND",
@@ -3273,6 +3316,15 @@ def route_message(inbound: NormalizedWebhook) -> Dict[str, Any]:
     if state == "CONFIRMED":
         return handle_confirmed(inbound, conversation)
     return handle_new_or_asking(inbound, conversation)
+
+
+def route_message(inbound: NormalizedWebhook) -> Dict[str, Any]:
+    identity = conversation_identity_from_inbound(inbound)
+    token = ACTIVE_CONVERSATION_IDENTITY.set(identity)
+    try:
+        return _route_message_scoped(inbound)
+    finally:
+        ACTIVE_CONVERSATION_IDENTITY.reset(token)
 
 
 @app.get("/health")
