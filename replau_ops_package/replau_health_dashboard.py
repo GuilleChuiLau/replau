@@ -469,6 +469,20 @@ def latest_backup():
     successful=result.get("ok") and values.get("Result")=="success" and values.get("ExecMainStatus")=="0" and bool(values.get("ExecMainExitTimestamp"))
     if successful:
         return {"ok":True,"source":"systemd","service":BACKUP_SERVICE,"result":values.get("Result"),"modified_at":values.get("ExecMainExitTimestamp"),"path_visibility":"restricted"}
+    journal=cmd(["journalctl","--unit",BACKUP_SERVICE,"--output=json","--no-pager","-n","200"])
+    if journal.get("ok"):
+        for line in reversed(journal.get("stdout","").splitlines()):
+            try:
+                event=json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "Backup complete" not in str(event.get("MESSAGE") or ""):
+                continue
+            timestamp=str(event.get("__REALTIME_TIMESTAMP") or "")
+            modified_at=None
+            if timestamp.isdigit():
+                modified_at=datetime.fromtimestamp(int(timestamp)/1_000_000,tz=timezone.utc).isoformat().replace("+00:00","Z")
+            return {"ok":True,"source":"journal","service":BACKUP_SERVICE,"result":"success","modified_at":modified_at,"path_visibility":"restricted"}
     return {"ok":False,"source":"systemd","service":BACKUP_SERVICE,"result":values.get("Result") or "unknown","error":result.get("stderr") or "No successful backup execution found"}
 def whatsapp_watchdog():
     p=Path(WHATSAPP_WATCHDOG_STATE)

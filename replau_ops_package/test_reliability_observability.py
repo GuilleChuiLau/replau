@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import unittest
+import json
 from pathlib import Path
+from unittest.mock import patch
 
+import replau_health_dashboard as dashboard
 import replau_whatsapp_watchdog as watchdog
 
 
@@ -41,8 +44,22 @@ class BackupVisibilityTests(unittest.TestCase):
             'values.get("Result")=="success"',
             'values.get("ExecMainStatus")=="0"',
             '"path_visibility":"restricted"',
+            '["journalctl","--unit",BACKUP_SERVICE',
+            '"Backup complete"',
         ):
             self.assertIn(marker, DASHBOARD_SOURCE)
+
+    def test_previous_boot_backup_is_recovered_from_journal(self) -> None:
+        event=json.dumps({"MESSAGE":"[2026-07-22] Backup complete","__REALTIME_TIMESTAMP":"1784743727000000"})
+        responses=[
+            {"ok":False,"stdout":"","stderr":"restricted"},
+            {"ok":True,"stdout":event+"\n","stderr":""},
+        ]
+        with patch.object(dashboard.Path,"exists",return_value=False), patch.object(dashboard,"cmd",side_effect=responses):
+            result=dashboard.latest_backup()
+        self.assertTrue(result["ok"])
+        self.assertEqual("journal",result["source"])
+        self.assertEqual("restricted",result["path_visibility"])
 
     def test_disabled_email_channel_does_not_create_queue_warning(self) -> None:
         self.assertIn('EMAIL_NOTIFICATIONS_ENABLED=os.environ.get("EMAIL_NOTIFICATIONS_ENABLED","false")', DASHBOARD_SOURCE)
