@@ -1,0 +1,13 @@
+[Unit]
+Description=Replau WhatsApp conversation request privacy retention
+After=postgrest-localapi.service
+Requires=postgrest-localapi.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/guill/.openclaw/workspace/replau/replau_ops_package
+EnvironmentFile=/home/guill/.config/replau/ops.env
+ExecStart=/home/guill/.local/share/replau/services/ops-venv/bin/python replau_conversation_retention.py
+NoNewPrivileges=true
+PrivateTmp=true
+

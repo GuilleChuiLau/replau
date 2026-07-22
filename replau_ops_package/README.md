@@ -6,6 +6,7 @@ Adds:
 2. Daily PostgreSQL backup with systemd timer
 3. Stuck WhatsApp/email monitor with systemd timer
 4. WhatsApp gateway watchdog with systemd timer
+5. WhatsApp conversation-request privacy retention with a daily user timer
 5. Private, token-protected list of user-initiated WhatsApp conversation requests
 
 ## Install
@@ -22,6 +23,19 @@ sudo systemctl status replau-health-dashboard --no-pager
 curl http://127.0.0.1:8793/health | jq
 systemctl list-timers replau-daily-backup.timer replau-stuck-monitor.timer replau-whatsapp-watchdog.timer --no-pager
 ```
+
+The conversation-request retention job is deployed as a user service because it
+uses the existing private PostgREST endpoint and Ops environment:
+
+```bash
+cp replau-conversation-retention.service replau-conversation-retention.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now replau-conversation-retention.timer
+systemctl --user start replau-conversation-retention.service
+```
+
+It runs daily at 03:00, after the 02:30 PostgreSQL backup. See
+`WHATSAPP_CONVERSATION_REQUESTS.md` for the retention windows and overrides.
 
 ## Reliability signals
 

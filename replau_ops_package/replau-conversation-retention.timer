@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Replau WhatsApp request privacy retention daily
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+Unit=replau-conversation-retention.service
+
+[Install]
+WantedBy=timers.target

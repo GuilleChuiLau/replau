@@ -58,3 +58,20 @@ prevent a customer from ordering.
 Phase 3 is implemented and regression-tested in source. Do not enable a second
 live WhatsApp account until both migrations and the updated bridge/plugin have
 been deployed together and the controlled current-account test passes.
+
+## Privacy retention
+
+`add_whatsapp_request_retention.sql` installs a transactional cleanup function.
+The daily `replau-conversation-retention.timer` applies these defaults after the
+02:30 database backup:
+
+- Open requests inactive for 30 days lose sender name, message text, and provider message IDs.
+- Closed or blocked requests lose those fields after 7 days.
+- Closed or blocked request rows are deleted after 90 days.
+
+Channel identity, customer address, status, counts, and timestamps remain only
+while the row is operationally retained. The cleanup never deletes active rows.
+The three windows can be overridden in `ops.env` with
+`WHATSAPP_REQUEST_ACTIVE_REDACT_DAYS`, `WHATSAPP_REQUEST_CLOSED_REDACT_DAYS`,
+and `WHATSAPP_REQUEST_DELETE_DAYS`; both the runner and database function reject
+unsafe values.
