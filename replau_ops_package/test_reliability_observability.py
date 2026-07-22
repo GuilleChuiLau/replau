@@ -5,6 +5,7 @@ import unittest
 import json
 from pathlib import Path
 from unittest.mock import patch
+from starlette.requests import Request
 
 import replau_health_dashboard as dashboard
 import replau_whatsapp_watchdog as watchdog
@@ -72,10 +73,49 @@ class ConversationRequestQueueTests(unittest.TestCase):
             '@app.get("/conversation-requests"',
             'auth(req,x_ops_token)',
             '"AUTO_STARTED","IN_PROGRESS","CLOSED","BLOCKED"',
-            'This is not a cold-outreach list.',
-            'consent_basis',
+            'Never use it for cold outreach.',
+            'update_whatsapp_request_inbox',
+            'INBOX_ACTIONS',
+            'Internal note',
+            'Audit timeline',
         ):
             self.assertIn(marker, DASHBOARD_SOURCE)
+
+    def test_inbox_filters_are_combined_without_server_side_injection(self) -> None:
+        rows=[
+            {"id":1,"status":"AUTO_STARTED","priority":"URGENT","assigned_to":None,"is_unread":True,"sender_name":"Ana","pedido_num":"PED-1"},
+            {"id":2,"status":"CLOSED","priority":"NORMAL","assigned_to":"Memo","is_unread":False,"sender_name":"Luis","pedido_num":"PED-2"},
+        ]
+        with patch.object(dashboard,"pg",return_value={"ok":True,"data":rows}):
+            result=dashboard.conversation_requests("AUTO_STARTED","URGENT","unassigned","true","ana")
+        self.assertEqual([1],[row["id"] for row in result["data"]])
+
+    def test_inbox_metrics_surface_waiting_and_response_time(self) -> None:
+        metrics=dashboard.conversation_inbox_metrics([
+            {"status":"AUTO_STARTED","is_unread":True,"wait_minutes":20,"priority":"URGENT","response_seconds":120},
+            {"status":"IN_PROGRESS","is_unread":False,"wait_minutes":2,"priority":"NORMAL","response_seconds":240},
+        ])
+        self.assertEqual(2,metrics["open"])
+        self.assertEqual(1,metrics["unread"])
+        self.assertEqual(1,metrics["waiting"])
+        self.assertEqual(180,metrics["avg_response_seconds"])
+
+    def test_staff_inbox_renders_operational_context(self) -> None:
+        row={
+            "id":1,"status":"AUTO_STARTED","priority":"URGENT","assigned_to":None,
+            "is_unread":True,"sender_name":"Ana","customer_address":"51999999999",
+            "inbound_count":2,"wait_minutes":20,"last_message_text":"menu",
+            "first_inbound_at":"2026-07-22T10:00:00-05:00","last_inbound_at":"2026-07-22T10:01:00-05:00",
+            "sla_due_at":"2026-07-22T10:15:00-05:00","response_seconds":None,
+            "pedido_num":"PED-1","order_status":"CONFIRMADO","order_total":42,
+            "note_count":1,"latest_note":"Call customer","latest_note_author":"Memo",
+        }
+        request=Request({"type":"http","method":"GET","path":"/conversation-requests","query_string":b"","headers":[]})
+        with patch.object(dashboard,"conversation_requests",return_value={"ok":True,"data":[row]}):
+            response=dashboard.conversation_requests_page(request)
+        body=response.body.decode()
+        for marker in ("WhatsApp Staff Inbox","PED-1","Call customer","Waiting 15m+","MARK_READ"):
+            self.assertIn(marker,body)
 
 
 if __name__ == "__main__":

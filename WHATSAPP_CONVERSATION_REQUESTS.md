@@ -75,3 +75,25 @@ The three windows can be overridden in `ops.env` with
 `WHATSAPP_REQUEST_ACTIVE_REDACT_DAYS`, `WHATSAPP_REQUEST_CLOSED_REDACT_DAYS`,
 and `WHATSAPP_REQUEST_DELETE_DAYS`; both the runner and database function reject
 unsafe values.
+
+## Staff inbox
+
+Migration `add_whatsapp_staff_inbox.sql` upgrades the private queue into an
+operational inbox at `http://127.0.0.1:8793/conversation-requests`.
+
+The inbox provides:
+
+- unread/read state and 15-minute waiting/SLA indicators;
+- `NORMAL`, `HIGH`, and `URGENT` priority;
+- staff assignment and take/resolve/block/reopen actions;
+- append-only internal notes and an append-only lifecycle audit timeline;
+- latest linked-order context when the customer has an order;
+- search and status/priority/ownership/read-state filters;
+- open, unread, overdue, urgent, new-today, resolved-today, and average
+  first-response metrics.
+
+Every write is validated by `api.update_whatsapp_request_inbox`; the dashboard
+does not patch lifecycle fields directly. New customer messages mark a request
+unread, and a message after closure reopens it with a fresh SLA. Internal notes
+are private and are deleted by the existing privacy-retention job when the
+corresponding request content reaches its redaction window.

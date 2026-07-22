@@ -144,9 +144,45 @@ def pg_update(path,payload):
         r=requests.patch(POSTGREST_BASE_URL+path,json=payload,headers={"Prefer":"return=representation"},timeout=REQUEST_TIMEOUT); r.raise_for_status()
         return {"ok":True,"data":r.json()}
     except Exception as e: return {"ok":False,"data":[],"error":f"{type(e).__name__}: {e}"}
-def conversation_requests(status=""):
-    status_filter=f"&status=eq.{quote(status,safe='')}" if status else ""
-    return pg("/whatsapp_conversation_requests?select=id,channel_id,account_id,customer_address,sender_name,first_message_text,last_message_text,inbound_count,status,consent_basis,first_inbound_at,last_inbound_at,status_updated_at,status_updated_by"+status_filter+"&order=last_inbound_at.desc&limit=500")
+def pg_post(path,payload):
+    try:
+        r=requests.post(POSTGREST_BASE_URL+path,json=payload,timeout=REQUEST_TIMEOUT); r.raise_for_status()
+        return {"ok":True,"data":r.json()}
+    except Exception as e: return {"ok":False,"data":{},"error":f"{type(e).__name__}: {e}"}
+INBOX_STATUSES={"AUTO_STARTED","IN_PROGRESS","CLOSED","BLOCKED"}
+INBOX_PRIORITIES={"NORMAL","HIGH","URGENT"}
+INBOX_ACTIONS={"TAKE","ASSIGN","PRIORITY","NOTE","CLOSE","BLOCK","REOPEN","MARK_READ","MARK_UNREAD"}
+def conversation_requests(status="",priority="",assigned="",unread="",query=""):
+    result=pg("/v_whatsapp_request_inbox?select=*&order=last_inbound_at.desc&limit=500")
+    if not result["ok"]: return result
+    rows=result["data"]
+    if status: rows=[row for row in rows if str(row.get("status") or "")==status]
+    if priority: rows=[row for row in rows if str(row.get("priority") or "")==priority]
+    if assigned == "unassigned": rows=[row for row in rows if not row.get("assigned_to")]
+    elif assigned: rows=[row for row in rows if str(row.get("assigned_to") or "").lower()==assigned.lower()]
+    if unread in {"true","false"}: rows=[row for row in rows if bool(row.get("is_unread"))==(unread=="true")]
+    search=query.strip().lower()
+    if search:
+        rows=[row for row in rows if search in " ".join(str(row.get(key) or "") for key in (
+            "sender_name","customer_address","first_message_text","last_message_text","assigned_to","latest_note","pedido_num","order_status"
+        )).lower()]
+    return {"ok":True,"data":rows}
+def conversation_inbox_metrics(rows):
+    local_today=datetime.now(ZoneInfo(BUSINESS_TZ)).date()
+    def local_date(value):
+        parsed=parse_dt(value)
+        return parsed.astimezone(ZoneInfo(BUSINESS_TZ)).date() if parsed else None
+    open_rows=[row for row in rows if row.get("status") in {"AUTO_STARTED","IN_PROGRESS"}]
+    response_seconds=[int(row.get("response_seconds")) for row in rows if row.get("response_seconds") is not None]
+    return {
+        "open":len(open_rows),
+        "unread":sum(bool(row.get("is_unread")) for row in open_rows),
+        "waiting":sum(int(row.get("wait_minutes") or 0)>=15 for row in open_rows),
+        "urgent":sum(row.get("priority")=="URGENT" for row in open_rows),
+        "new_today":sum(local_date(row.get("first_inbound_at"))==local_today for row in rows),
+        "resolved_today":sum(local_date(row.get("resolved_at"))==local_today for row in rows),
+        "avg_response_seconds":round(sum(response_seconds)/len(response_seconds)) if response_seconds else None,
+    }
 def restaurant_status():
     default={
         "accepting_orders":True,
@@ -556,23 +592,59 @@ async def update_restaurant_status(req:Request,x_ops_token:Optional[str]=Header(
     save_restaurant_status(accepting_orders.lower() in {"true","1","yes","on","open"},reason,customer_message,"ops-dashboard")
     return RedirectResponse(url=with_token("/?flash=Restaurant+status+updated",req),status_code=303)
 @app.get("/api/conversation-requests")
-def api_conversation_requests(req:Request,status:str="",x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
+def api_conversation_requests(req:Request,status:str="",priority:str="",assigned:str="",unread:str="",q:str="",x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
     auth(req,x_ops_token)
-    if status and status not in {"AUTO_STARTED","IN_PROGRESS","CLOSED","BLOCKED"}:
+    status=status.upper(); priority=priority.upper()
+    if status and status not in INBOX_STATUSES:
         raise HTTPException(400,"Invalid request status")
-    result=conversation_requests(status)
+    if priority and priority not in INBOX_PRIORITIES:
+        raise HTTPException(400,"Invalid request priority")
+    if unread and unread not in {"true","false"}:
+        raise HTTPException(400,"Invalid unread filter")
+    result=conversation_requests(status,priority,assigned,unread,q)
     if not result["ok"]: raise HTTPException(502,result.get("error") or "Conversation request queue unavailable")
+    all_result=conversation_requests()
+    return {**result,"metrics":conversation_inbox_metrics(all_result["data"] if all_result["ok"] else result["data"])}
+@app.get("/api/conversation-requests/{request_id}/notes")
+def api_conversation_request_notes(request_id:int,req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
+    auth(req,x_ops_token)
+    result=pg(f"/whatsapp_request_notes?request_id=eq.{request_id}&select=id,note_text,author,created_at&order=created_at.desc&limit=100")
+    if not result["ok"]: raise HTTPException(502,result.get("error") or "Notes unavailable")
     return result
+@app.get("/api/conversation-requests/{request_id}/events")
+def api_conversation_request_events(request_id:int,req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
+    auth(req,x_ops_token)
+    result=pg(f"/whatsapp_request_events?request_id=eq.{request_id}&select=id,event_type,actor,from_status,to_status,details,created_at&order=created_at.desc&limit=100")
+    if not result["ok"]: raise HTTPException(502,result.get("error") or "Events unavailable")
+    return result
+@app.post("/api/conversation-requests/{request_id}/action")
+async def update_conversation_request_action(request_id:int,req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
+    auth(req,x_ops_token)
+    form={k:v[-1] if v else "" for k,v in parse_qs((await req.body()).decode("utf-8"),keep_blank_values=True).items()}
+    action=form.get("action","").upper().strip()
+    actor=form.get("actor","ops-dashboard").strip() or "ops-dashboard"
+    assigned_to=form.get("assigned_to","").strip()
+    priority=form.get("priority","").upper().strip()
+    note=form.get("note","").strip()
+    if action not in INBOX_ACTIONS: raise HTTPException(400,"Invalid inbox action")
+    if len(actor)>80 or len(assigned_to)>80 or len(note)>2000: raise HTTPException(400,"Inbox value is too long")
+    if priority and priority not in INBOX_PRIORITIES: raise HTTPException(400,"Invalid priority")
+    result=pg_post("/rpc/update_whatsapp_request_inbox",{
+        "p_request_id":request_id,"p_action":action,"p_actor":actor,
+        "p_assigned_to":assigned_to or None,"p_priority":priority or None,"p_note":note or None,
+    })
+    if not result["ok"]: raise HTTPException(502,result.get("error") or "Could not update request")
+    return RedirectResponse(url=with_token("/conversation-requests?flash=Inbox+updated",req),status_code=303)
 @app.post("/api/conversation-requests/{request_id}/status")
 async def update_conversation_request_status(request_id:int,req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
     auth(req,x_ops_token)
     form={k:v[-1] if v else "" for k,v in parse_qs((await req.body()).decode("utf-8"),keep_blank_values=True).items()}
     status=form.get("status","").upper()
-    if status not in {"AUTO_STARTED","IN_PROGRESS","CLOSED","BLOCKED"}:
+    if status not in INBOX_STATUSES:
         raise HTTPException(400,"Invalid request status")
-    result=pg_update(f"/whatsapp_conversation_requests?id=eq.{request_id}",{"status":status,"status_updated_at":now(),"status_updated_by":"ops-dashboard"})
+    action={"AUTO_STARTED":"REOPEN","IN_PROGRESS":"TAKE","CLOSED":"CLOSE","BLOCKED":"BLOCK"}[status]
+    result=pg_post("/rpc/update_whatsapp_request_inbox",{"p_request_id":request_id,"p_action":action,"p_actor":"ops-dashboard","p_assigned_to":None,"p_priority":None,"p_note":None})
     if not result["ok"]: raise HTTPException(502,result.get("error") or "Could not update request")
-    if not result["data"]: raise HTTPException(404,"Conversation request not found")
     return RedirectResponse(url=with_token("/conversation-requests?flash=Request+status+updated",req),status_code=303)
 def tbl(rows,cols):
     if not rows: return '<div class="empty">No rows.</div>'
@@ -622,15 +694,34 @@ def ingredient_behavior_rows(rows):
         products=", ".join(r.get("linked_products",[])[:3]) or "No linked products"
         parts.append(f'''<div class="metric-row"><div><strong>{esc(r.get("ingredient"))}</strong><div class="muted">{esc(products)}</div></div><div class="right"><strong>{esc(days)}</strong><div class="muted">Stock value {money(r.get("stock_value"))}</div></div></div>''')
     return "".join(parts)
-def request_status_form(row,req):
+def inbox_action_form(row,req):
     rid=int(row.get("id") or 0)
-    current=str(row.get("status") or "AUTO_STARTED")
-    options="".join(f'<option value="{value}" {"selected" if value==current else ""}>{value.replace("_"," ")}</option>' for value in ("AUTO_STARTED","IN_PROGRESS","CLOSED","BLOCKED"))
-    return f'<form method="post" action="/api/conversation-requests/{rid}/status{token_query(req)}"><select name="status" aria-label="Status for request {rid}">{options}</select><button type="submit">Save</button></form>'
+    current_priority=str(row.get("priority") or "NORMAL")
+    priorities="".join(f'<option value="{value}" {"selected" if value==current_priority else ""}>{value.title()}</option>' for value in ("NORMAL","HIGH","URGENT"))
+    read_action="MARK_READ" if row.get("is_unread") else "MARK_UNREAD"
+    read_label="Mark read" if row.get("is_unread") else "Mark unread"
+    return f'''<details><summary>Staff actions</summary>
+<form class="action-form" method="post" action="/api/conversation-requests/{rid}/action{token_query(req)}">
+<label>Operator<input name="actor" value="ops-dashboard" maxlength="80" required></label>
+<label>Assign to<input name="assigned_to" value="{esc(row.get("assigned_to") or "")}" maxlength="80" placeholder="Staff name"></label>
+<label>Priority<select name="priority">{priorities}</select></label>
+<label>Internal note<textarea name="note" maxlength="2000" placeholder="Visible to staff only"></textarea></label>
+<label>Action<select name="action"><option value="TAKE">Take request</option><option value="ASSIGN">Assign</option><option value="PRIORITY">Change priority</option><option value="NOTE">Add note</option><option value="CLOSE">Resolve</option><option value="REOPEN">Reopen</option><option value="BLOCK">Block</option><option value="{read_action}">{read_label}</option></select></label>
+<button type="submit">Apply</button></form></details>'''
 @app.get("/conversation-requests",response_class=HTMLResponse)
 def conversation_requests_page(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
     auth(req,x_ops_token)
-    result=conversation_requests()
+    status=req.query_params.get("status","").upper()
+    priority=req.query_params.get("priority","").upper()
+    assigned=req.query_params.get("assigned","")
+    unread=req.query_params.get("unread","").lower()
+    query=req.query_params.get("q","")
+    if status and status not in INBOX_STATUSES: raise HTTPException(400,"Invalid request status")
+    if priority and priority not in INBOX_PRIORITIES: raise HTTPException(400,"Invalid request priority")
+    if unread and unread not in {"true","false"}: raise HTTPException(400,"Invalid unread filter")
+    result=conversation_requests(status,priority,assigned,unread,query)
+    all_result=conversation_requests()
+    metrics=conversation_inbox_metrics(all_result["data"] if all_result["ok"] else result.get("data",[]))
     flash=req.query_params.get("flash","")
     flash_html=f'<div class="flash">{esc(flash)}</div>' if flash else ""
     if not result["ok"]:
@@ -638,9 +729,19 @@ def conversation_requests_page(req:Request,x_ops_token:Optional[str]=Header(defa
     else:
         rows=[]
         for row in result["data"]:
-            rows.append(f'''<tr><td>{esc(row.get("last_inbound_at"))}</td><td><strong>{esc(row.get("sender_name") or "Unknown")}</strong><br><span class="muted">{esc(row.get("customer_address"))}</span></td><td>{esc(row.get("channel_id"))}<br><span class="muted">{esc(row.get("account_id") or "default")}</span></td><td>{esc(row.get("first_message_text"))}</td><td>{esc(row.get("last_message_text"))}</td><td>{esc(row.get("inbound_count"))}</td><td>{esc(row.get("consent_basis"))}</td><td>{request_status_form(row,req)}</td></tr>''')
-        rows_html='<table><thead><tr><th>Last inbound</th><th>Customer</th><th>Account</th><th>First message</th><th>Latest message</th><th>Messages</th><th>Consent</th><th>Internal status</th></tr></thead><tbody>'+"".join(rows)+'</tbody></table>' if rows else '<div class="empty">No user-initiated WhatsApp requests yet.</div>'
-    return HTMLResponse(f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>WhatsApp Requests · Replau</title><style>body{{margin:0;background:#0b1120;color:#e5edf7;font-family:Inter,system-ui,sans-serif}}.wrap{{max-width:1480px;margin:auto;padding:22px}}.erp-nav{{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 18px;padding:12px;border:1px solid #334155;border-radius:14px;background:#0b1220}}.erp-nav a{{color:#fff;background:#1f2937;border:1px solid #334155;border-radius:999px;padding:8px 11px;text-decoration:none}}.card{{background:#111827;border:1px solid #334155;border-radius:10px;padding:18px;overflow:auto}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{padding:10px;border-bottom:1px solid #26364a;text-align:left;vertical-align:top;max-width:280px}}th{{color:#a78bfa}}.muted{{color:#94a3b8}}select,button{{padding:8px;border-radius:8px;border:1px solid #475569;background:#020617;color:#e5edf7}}button{{margin-top:6px;background:#374151;cursor:pointer}}.flash{{background:#1e1b4b;border:1px solid #7c3aed;padding:12px;border-radius:8px;margin:12px 0}}.badline{{background:#3f1010;border-color:#ef4444}}@media(max-width:760px){{table{{min-width:1050px}}}}</style></head><body><div class="wrap"><h1>WhatsApp Conversation Requests</h1><p class="muted">Private queue of customers who initiated a direct chat. This is not a cold-outreach list.</p>{erp_nav(req)}{flash_html}<div class="card">{rows_html}</div></div></body></html>''')
+            wait=int(row.get("wait_minutes") or 0)
+            urgency=" overdue" if row.get("status") in {"AUTO_STARTED","IN_PROGRESS"} and wait>=15 else ""
+            unread_class=" unread" if row.get("is_unread") else ""
+            order_html=(f'''<div class="order"><strong>{esc(row.get("pedido_num"))}</strong> · {esc(row.get("order_status"))} · {money(row.get("order_total"))}<br><span class="muted">Created {esc(row.get("order_created_at"))}</span></div>''' if row.get("pedido_num") else '<div class="muted">No linked order yet</div>')
+            note_html=(f'''<blockquote>{esc(row.get("latest_note"))}<footer>{esc(row.get("latest_note_author"))} · {esc(row.get("latest_note_at"))} · {esc(row.get("note_count"))} note(s)</footer></blockquote>''' if row.get("latest_note") else '<div class="muted">No internal notes</div>')
+            response="—" if row.get("response_seconds") is None else f'{round(int(row.get("response_seconds"))/60,1)} min'
+            rows.append(f'''<article class="request{unread_class}{urgency}"><div class="request-head"><div><span class="priority {esc(str(row.get("priority") or "NORMAL").lower())}">{esc(row.get("priority") or "NORMAL")}</span> <span class="status">{esc(str(row.get("status") or "").replace("_"," "))}</span>{' <span class="new">UNREAD</span>' if row.get("is_unread") else ''}<h2>{esc(row.get("sender_name") or "Unknown customer")}</h2><div class="muted">{esc(row.get("customer_address"))} · {esc(row.get("inbound_count"))} inbound message(s)</div></div><div class="wait"><strong>{wait} min</strong><span>waiting</span></div></div><div class="request-grid"><section><h3>Latest message</h3><p>{esc(row.get("last_message_text") or "Content redacted by retention")}</p><div class="muted">First contact: {esc(row.get("first_inbound_at"))}<br>Last inbound: {esc(row.get("last_inbound_at"))}<br>First response: {esc(response)}</div></section><section><h3>Ownership</h3><p><strong>{esc(row.get("assigned_to") or "Unassigned")}</strong></p><div class="muted">Assigned: {esc(row.get("assigned_at") or "—")}<br>SLA due: {esc(row.get("sla_due_at") or "—")}</div><h3>Latest order</h3>{order_html}</section><section><h3>Internal notes</h3>{note_html}<p><a class="link" href="/api/conversation-requests/{int(row.get('id'))}/notes{token_query(req)}" target="_blank">All notes</a> · <a class="link" href="/api/conversation-requests/{int(row.get('id'))}/events{token_query(req)}" target="_blank">Audit timeline</a></p>{inbox_action_form(row,req)}</section></div></article>''')
+        rows_html="".join(rows) if rows else '<div class="empty">No requests match these filters.</div>'
+    status_options='<option value="">All statuses</option>'+"".join(f'<option value="{value}" {"selected" if status==value else ""}>{value.replace("_"," ").title()}</option>' for value in ("AUTO_STARTED","IN_PROGRESS","CLOSED","BLOCKED"))
+    priority_options='<option value="">All priorities</option>'+"".join(f'<option value="{value}" {"selected" if priority==value else ""}>{value.title()}</option>' for value in ("NORMAL","HIGH","URGENT"))
+    token_hidden=f'<input type="hidden" name="token" value="{esc(req.query_params.get("token"))}">' if req.query_params.get("token") else ""
+    avg_response="—" if metrics["avg_response_seconds"] is None else f'{round(metrics["avg_response_seconds"]/60,1)}m'
+    return HTMLResponse(f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Staff Inbox · Replau</title><style>body{{margin:0;background:#0b1120;color:#e5edf7;font-family:Inter,system-ui,sans-serif}}.wrap{{max-width:1480px;margin:auto;padding:22px}}.erp-nav{{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 18px;padding:12px;border:1px solid #334155;border-radius:14px;background:#0b1220}}.erp-nav a,.link{{color:#c4b5fd}}.erp-nav a{{background:#1f2937;border:1px solid #334155;border-radius:999px;padding:8px 11px;text-decoration:none}}.metrics{{display:grid;grid-template-columns:repeat(7,1fr);gap:10px;margin:16px 0}}.metric{{background:#111827;border:1px solid #334155;border-radius:10px;padding:13px}}.metric strong{{display:block;font-size:27px;color:#a78bfa}}.metric span,.muted{{color:#94a3b8}}.filters,.action-form{{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;align-items:end}}.filters{{background:#111827;border:1px solid #334155;border-radius:10px;padding:14px;margin-bottom:14px}}input,textarea,select,button{{width:100%;box-sizing:border-box;padding:9px;border-radius:8px;border:1px solid #475569;background:#020617;color:#e5edf7}}textarea{{min-height:70px}}button{{background:#6d28d9;font-weight:800;cursor:pointer}}label{{font-size:12px;color:#c4b5fd}}.request{{background:#111827;border:1px solid #334155;border-radius:12px;padding:18px;margin:12px 0}}.request.unread{{border-left:6px solid #3b82f6}}.request.overdue{{box-shadow:inset 0 0 0 1px #f97316}}.request-head{{display:flex;justify-content:space-between;gap:16px}}.request-head h2{{margin:8px 0 4px}}.wait{{text-align:right}}.wait strong{{display:block;font-size:26px}}.wait span{{color:#94a3b8}}.request-grid{{display:grid;grid-template-columns:1.2fr 1fr 1.3fr;gap:18px;margin-top:14px}}.priority,.status,.new{{display:inline-block;padding:5px 8px;border-radius:999px;font-size:11px;font-weight:900}}.priority.normal,.status{{background:#334155}}.priority.high{{background:#b45309}}.priority.urgent{{background:#b91c1c}}.new{{background:#1d4ed8}}blockquote{{margin:8px 0;padding:10px;border-left:3px solid #7c3aed;background:#0b1220}}blockquote footer{{margin-top:7px;color:#94a3b8;font-size:12px}}details{{margin-top:12px}}summary{{cursor:pointer;color:#c4b5fd;font-weight:800}}.action-form{{grid-template-columns:1fr 1fr;margin-top:10px}}.action-form label:nth-child(4){{grid-column:1/-1}}.flash{{background:#1e1b4b;border:1px solid #7c3aed;padding:12px;border-radius:8px;margin:12px 0}}.badline{{background:#3f1010;border-color:#ef4444}}.empty{{padding:30px;text-align:center;color:#94a3b8}}@media(max-width:1000px){{.metrics{{grid-template-columns:repeat(3,1fr)}}.request-grid{{grid-template-columns:1fr}}}}@media(max-width:650px){{.metrics,.filters,.action-form{{grid-template-columns:1fr}}}}</style></head><body><div class="wrap"><h1>WhatsApp Staff Inbox</h1><p class="muted">Private workspace for conversations initiated by customers. Never use it for cold outreach.</p>{erp_nav(req)}{flash_html}<div class="metrics"><div class="metric"><strong>{metrics['open']}</strong><span>Open</span></div><div class="metric"><strong>{metrics['unread']}</strong><span>Unread</span></div><div class="metric"><strong>{metrics['waiting']}</strong><span>Waiting 15m+</span></div><div class="metric"><strong>{metrics['urgent']}</strong><span>Urgent</span></div><div class="metric"><strong>{metrics['new_today']}</strong><span>New today</span></div><div class="metric"><strong>{metrics['resolved_today']}</strong><span>Resolved today</span></div><div class="metric"><strong>{avg_response}</strong><span>Avg first response</span></div></div><form class="filters" method="get" action="/conversation-requests">{token_hidden}<label>Search<input name="q" value="{esc(query)}" placeholder="Customer, message, order"></label><label>Status<select name="status">{status_options}</select></label><label>Priority<select name="priority">{priority_options}</select></label><label>Ownership<select name="assigned"><option value="">Anyone</option><option value="unassigned" {"selected" if assigned=="unassigned" else ""}>Unassigned</option></select></label><label>Read state<select name="unread"><option value="">All</option><option value="true" {"selected" if unread=="true" else ""}>Unread</option><option value="false" {"selected" if unread=="false" else ""}>Read</option></select></label><button type="submit">Filter inbox</button></form>{rows_html}</div></body></html>''')
 @app.get("/",response_class=HTMLResponse)
 def dash(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
     auth(req,x_ops_token); h=collect(); bsum=business_summary()
