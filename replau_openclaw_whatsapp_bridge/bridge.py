@@ -17,10 +17,12 @@ import base64
 import hashlib
 import mimetypes
 import uuid
+from collections import defaultdict, deque
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -50,7 +52,14 @@ HUMAN_HANDOFF_PATH = Path(os.environ.get("REPLAU_HUMAN_HANDOFF_PATH", "/home/gui
 PAYMENT_RECEIPT_DIR = Path(os.environ.get("PAYMENT_RECEIPT_DIR", "/home/guill/.openclaw/workspace/replau_payment_receipts"))
 INBOUND_MEDIA_DIR = Path(os.environ.get("OPENCLAW_INBOUND_MEDIA_DIR", "/home/guill/.openclaw/media/inbound"))
 MAX_RECEIPT_BYTES = int(os.environ.get("MAX_PAYMENT_RECEIPT_BYTES", str(10 * 1024 * 1024)))
+WHATSAPP_RATE_LIMIT_BURST = int(os.environ.get("WHATSAPP_RATE_LIMIT_BURST", "6"))
+WHATSAPP_RATE_LIMIT_BURST_SECONDS = int(os.environ.get("WHATSAPP_RATE_LIMIT_BURST_SECONDS", "10"))
+WHATSAPP_RATE_LIMIT_MINUTE = int(os.environ.get("WHATSAPP_RATE_LIMIT_MINUTE", "12"))
+WHATSAPP_RATE_LIMIT_REPEAT = int(os.environ.get("WHATSAPP_RATE_LIMIT_REPEAT", "4"))
+WHATSAPP_RATE_LIMIT_REPEAT_SECONDS = int(os.environ.get("WHATSAPP_RATE_LIMIT_REPEAT_SECONDS", "30"))
+WHATSAPP_RATE_LIMIT_MAX_SENDERS = int(os.environ.get("WHATSAPP_RATE_LIMIT_MAX_SENDERS", "10000"))
 ABUSE_MESSAGE = "Tu número ha sido bloqueado por lenguaje ofensivo o comportamiento inapropiado. No podremos seguir atendiendo pedidos desde este número."
+RATE_LIMIT_MESSAGE = "Recibimos muchos mensajes seguidos. Espera un momento y vuelve a intentarlo, por favor."
 DEFAULT_RESTAURANT_CLOSED_MESSAGE = "Estamos cerrados temporalmente. Escríbenos más tarde para hacer tu pedido."
 DEFAULT_ABUSE_PATTERNS = [
     (re.compile(r"\b(?:puta|puto|mierda|carajo|cojud[oa]|idiot[ae]|imbecil|imbecile|pendej[oa]|maldit[oa]|hij[oa]\s+de\s+puta|csm|ctm|conchatumadre|fuck|bitch|asshole)\b", re.IGNORECASE), "abusive_language"),
@@ -64,6 +73,9 @@ logging.basicConfig(
 )
 
 app = FastAPI(title="Replau OpenClaw WhatsApp Bridge", version="1.0.0")
+
+_RATE_LIMIT_LOCK = Lock()
+_RATE_LIMIT_EVENTS: Dict[str, deque[Tuple[float, str]]] = defaultdict(deque)
 
 
 def restaurant_status() -> Dict[str, Any]:
@@ -169,6 +181,47 @@ def conversation_identity_from_inbound(inbound: "NormalizedWebhook") -> Conversa
         account_id=(inbound.account_id or CHANNEL_ACCOUNT_ID),
         customer_address=(inbound.customer_address or inbound.whatsapp_number).strip(),
     )
+
+
+def inbound_rate_limit_reason(inbound: "NormalizedWebhook", now: Optional[float] = None) -> Optional[str]:
+    """Return the matched limit without persisting or mutating conversation state."""
+    identity = conversation_identity_from_inbound(inbound)
+    key = f"{identity.channel_kind}:{identity.channel_id}:{identity.customer_address}"
+    timestamp = time.monotonic() if now is None else now
+    fingerprint = hashlib.sha256(
+        f"{inbound.message_type}:{normalize_loose_text(inbound.message_text or '')}".encode("utf-8")
+    ).hexdigest()
+    longest_window = max(WHATSAPP_RATE_LIMIT_BURST_SECONDS, 60, WHATSAPP_RATE_LIMIT_REPEAT_SECONDS)
+
+    with _RATE_LIMIT_LOCK:
+        if key not in _RATE_LIMIT_EVENTS and len(_RATE_LIMIT_EVENTS) >= WHATSAPP_RATE_LIMIT_MAX_SENDERS:
+            stale_keys = [
+                sender_key
+                for sender_key, sender_events in _RATE_LIMIT_EVENTS.items()
+                if not sender_events or timestamp - sender_events[-1][0] >= longest_window
+            ]
+            for sender_key in stale_keys:
+                _RATE_LIMIT_EVENTS.pop(sender_key, None)
+            while len(_RATE_LIMIT_EVENTS) >= WHATSAPP_RATE_LIMIT_MAX_SENDERS:
+                _RATE_LIMIT_EVENTS.pop(next(iter(_RATE_LIMIT_EVENTS)))
+        events = _RATE_LIMIT_EVENTS[key]
+        while events and timestamp - events[0][0] >= longest_window:
+            events.popleft()
+        burst_count = sum(timestamp - seen_at < WHATSAPP_RATE_LIMIT_BURST_SECONDS for seen_at, _ in events)
+        minute_count = sum(timestamp - seen_at < 60 for seen_at, _ in events)
+        repeat_count = sum(
+            timestamp - seen_at < WHATSAPP_RATE_LIMIT_REPEAT_SECONDS and seen_fingerprint == fingerprint
+            for seen_at, seen_fingerprint in events
+        )
+        events.append((timestamp, fingerprint))
+
+        if repeat_count >= WHATSAPP_RATE_LIMIT_REPEAT:
+            return "repeated_message"
+        if burst_count >= WHATSAPP_RATE_LIMIT_BURST:
+            return "burst"
+        if minute_count >= WHATSAPP_RATE_LIMIT_MINUTE:
+            return "minute"
+        return None
 
 
 class NormalizedWebhook(BaseModel):
@@ -3356,6 +3409,18 @@ async def whatsapp_webhook(request: Request, x_hook_token: Optional[str] = Heade
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
     try:
         inbound = extract_payload(data)
+        rate_limit_reason = inbound_rate_limit_reason(inbound)
+        if rate_limit_reason:
+            identity = conversation_identity_from_inbound(inbound)
+            logging.warning(
+                "Rate limited WhatsApp inbound channel=%s/%s reason=%s",
+                identity.channel_kind,
+                identity.channel_id,
+                rate_limit_reason,
+            )
+            return JSONResponse(
+                reply(RATE_LIMIT_MESSAGE, next_state="RATE_LIMITED", rate_limited=True, rate_limit_reason=rate_limit_reason)
+            )
         result = route_message(inbound)
         return JSONResponse(result)
     except requests.HTTPError as exc:

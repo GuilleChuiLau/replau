@@ -8,6 +8,15 @@ It receives WhatsApp webhook messages, calls your PostgREST RPC endpoints, manag
 
 ```text
 POST http://127.0.0.1:8789/webhook/whatsapp
+
+The authenticated webhook applies per-customer, per-account flood controls before
+database writes or order-state changes. Defaults allow 6 messages per 10 seconds,
+12 per minute, and 4 repeats of identical content per 30 seconds. Override them
+with `WHATSAPP_RATE_LIMIT_BURST`, `WHATSAPP_RATE_LIMIT_BURST_SECONDS`,
+`WHATSAPP_RATE_LIMIT_MINUTE`, `WHATSAPP_RATE_LIMIT_REPEAT`, and
+`WHATSAPP_RATE_LIMIT_REPEAT_SECONDS` in `bridge.env` when operational evidence
+supports different thresholds. `WHATSAPP_RATE_LIMIT_MAX_SENDERS` bounds the
+in-memory sender map at 10,000 entries by default.
 ```
 
 ## Health route

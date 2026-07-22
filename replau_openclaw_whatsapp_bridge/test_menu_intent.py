@@ -59,6 +59,43 @@ class MenuIntentTest(unittest.TestCase):
         with patch.object(self.bridge, "pg_post", side_effect=RuntimeError("queue unavailable")):
             self.assertIsNone(self.bridge.register_conversation_request(inbound, identity))
 
+    def test_rate_limiter_allows_normal_conversation(self):
+        inbound = self.bridge.NormalizedWebhook(whatsapp_number="51999999991", message_text="menu")
+        self.bridge._RATE_LIMIT_EVENTS.clear()
+        for offset in (0, 12, 24, 36):
+            self.assertIsNone(self.bridge.inbound_rate_limit_reason(inbound, now=1000 + offset))
+
+    def test_rate_limiter_stops_repeated_message_spam(self):
+        inbound = self.bridge.NormalizedWebhook(whatsapp_number="51999999992", message_text="menu")
+        self.bridge._RATE_LIMIT_EVENTS.clear()
+        for offset in range(self.bridge.WHATSAPP_RATE_LIMIT_REPEAT):
+            self.assertIsNone(self.bridge.inbound_rate_limit_reason(inbound, now=2000 + offset))
+        self.assertEqual(self.bridge.inbound_rate_limit_reason(inbound, now=2005), "repeated_message")
+
+    def test_rate_limiter_is_scoped_per_customer_and_channel(self):
+        first = self.bridge.NormalizedWebhook(
+            whatsapp_number="51999999993", channel_id="whatsapp-account:first", message_text="hola"
+        )
+        second = self.bridge.NormalizedWebhook(
+            whatsapp_number="51999999993", channel_id="whatsapp-account:second", message_text="hola"
+        )
+        self.bridge._RATE_LIMIT_EVENTS.clear()
+        for offset in range(self.bridge.WHATSAPP_RATE_LIMIT_REPEAT):
+            self.assertIsNone(self.bridge.inbound_rate_limit_reason(first, now=3000 + offset))
+        self.assertEqual(self.bridge.inbound_rate_limit_reason(first, now=3005), "repeated_message")
+        self.assertIsNone(self.bridge.inbound_rate_limit_reason(second, now=3005))
+
+    def test_rate_limiter_prunes_stale_senders_at_capacity(self):
+        first = self.bridge.NormalizedWebhook(whatsapp_number="51999999994", message_text="hola")
+        second = self.bridge.NormalizedWebhook(whatsapp_number="51999999995", message_text="hola")
+        self.bridge._RATE_LIMIT_EVENTS.clear()
+        with patch.object(self.bridge, "WHATSAPP_RATE_LIMIT_MAX_SENDERS", 1):
+            self.assertIsNone(self.bridge.inbound_rate_limit_reason(first, now=4000))
+            self.assertIsNone(self.bridge.inbound_rate_limit_reason(second, now=4100))
+        keys = list(self.bridge._RATE_LIMIT_EVENTS)
+        self.assertEqual(len(keys), 1)
+        self.assertTrue(keys[0].endswith(":51999999995"))
+
     def test_same_phone_uses_distinct_conversation_paths_for_two_accounts(self):
         first = self.bridge.ConversationIdentity("whatsapp", "whatsapp-account:first", "51999999999", "first")
         second = self.bridge.ConversationIdentity("whatsapp", "whatsapp-account:second", "51999999999", "second")
