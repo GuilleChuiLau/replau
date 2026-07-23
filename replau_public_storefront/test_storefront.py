@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from starlette.requests import Request
 
-from public_storefront import CheckoutItem, CheckoutRequest, api_checkout, checkout_items, menu_items, proof_file_signature_ok, safe_tracking_url, storefront
+from public_storefront import CheckoutItem, CheckoutRequest, api_checkout, api_reverse_geocode, checkout_items, menu_items, proof_file_signature_ok, safe_tracking_url, storefront
 
 
 def main() -> None:
@@ -27,6 +27,8 @@ def main() -> None:
     assert "Finalizar pedido" in page
     assert "fetch('/api/checkout'" in page
     assert "Agregar mi ubicación actual" in page
+    assert "fetch(`/api/reverse-geocode?" in page
+    assert "address.value=data.address" in page
     assert "mobile-cart-summary" in page
     assert "100dvh" in page
     assert "Progreso del checkout" in page
@@ -69,6 +71,14 @@ def main() -> None:
     assert "Seguimiento: https://orders.replau.com/track/test-token" in handoff
     sent = create_order.call_args.args[1]
     assert sent["p_items"] == normalized and all("precio_unitario" not in item for item in sent["p_items"])
+    with patch("public_storefront.GOOGLE_MAPS_API_KEY", "test-key"), patch("public_storefront.requests.get") as google:
+        google.return_value.raise_for_status.return_value = None
+        google.return_value.json.return_value = {
+            "status": "OK",
+            "results": [{"formatted_address": "Av. Prueba 123, Lima, Perú"}],
+        }
+        geocode = api_reverse_geocode(-12.1, -77.03)
+    assert json.loads(geocode.body) == {"ok": True, "address": "Av. Prueba 123, Lima, Perú"}
     print(f"STOREFRONT_MENU_OK: {len(items)} sellable products")
 
 

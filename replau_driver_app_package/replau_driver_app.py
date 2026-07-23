@@ -433,11 +433,76 @@ def driver_app_dashboard(account_id: int, flash: str = "") -> HTMLResponse:
             "&limit=5"
         )
 
+    pedido_ids = sorted({
+        int(row["pedido_id"])
+        for row in [*offers, *assignments]
+        if row.get("pedido_id") is not None
+    })
+    orders_by_id: Dict[int, Dict[str, Any]] = {}
+    pickups_by_order: Dict[int, Dict[str, Any]] = {}
+    if pedido_ids:
+        id_filter = ",".join(str(value) for value in pedido_ids)
+        order_details = pg_get(
+            "/v_pedidos_logistica"
+            f"?id=in.({id_filter})"
+            "&select=id,direccion_confirmada,direccion_detectada,latitud,longitud,maps_url"
+        )
+        orders_by_id = {int(row["id"]): row for row in order_details}
+        pickup_details = pg_get(f"/v_order_pickup_points?pedido_id=in.({id_filter})")
+        pickups_by_order = {int(row["pedido_id"]): row for row in pickup_details}
+    try:
+        fee_result = pg_rpc("delivery_driver_fee", {})
+        offer_fee = fee_result if isinstance(fee_result, (int, float)) else fee_result.get("fee", "")
+    except (requests.RequestException, AttributeError):
+        offer_fee = ""
+
+    def trip_details(row: Dict[str, Any], include_fee: bool = True) -> str:
+        pedido_id = int(row["pedido_id"])
+        order = orders_by_id.get(pedido_id, {})
+        pickup = pickups_by_order.get(pedido_id, {})
+        pickup_address = row.get("pickup_direccion") or pickup.get("pickup_direccion") or ""
+        pickup_lat = row.get("pickup_latitude") or pickup.get("pickup_latitude")
+        pickup_lon = row.get("pickup_longitude") or pickup.get("pickup_longitude")
+        customer_address = order.get("direccion_confirmada") or order.get("direccion_detectada") or ""
+        customer_lat = order.get("latitud")
+        customer_lon = order.get("longitud")
+        pickup_maps = (
+            f"https://www.google.com/maps/search/?api=1&query={quote(f'{pickup_lat},{pickup_lon}', safe=',')}"
+            if pickup_lat is not None and pickup_lon is not None
+            else f"https://www.google.com/maps/search/?api=1&query={quote(str(pickup_address), safe='')}"
+        )
+        customer_maps = (
+            f"https://www.google.com/maps/search/?api=1&query={quote(f'{customer_lat},{customer_lon}', safe=',')}"
+            if customer_lat is not None and customer_lon is not None
+            else str(order.get("maps_url") or f"https://www.google.com/maps/search/?api=1&query={quote(str(customer_address), safe='')}")
+        )
+        route_maps = (
+            "https://www.google.com/maps/dir/?api=1"
+            f"&origin={quote(f'{pickup_lat},{pickup_lon}', safe=',')}"
+            f"&destination={quote(f'{customer_lat},{customer_lon}', safe=',')}"
+            "&travelmode=driving"
+            if pickup_lat is not None and pickup_lon is not None and customer_lat is not None and customer_lon is not None
+            else ""
+        )
+        fee = row.get("fee") if row.get("fee") is not None else offer_fee
+        fee_html = f'<p><strong>Driver fee:</strong> S/ {esc(fee)}</p>' if include_fee and fee != "" else ""
+        route_button = f'<a class="button good" target="_blank" rel="noopener" href="{esc(route_maps)}">Full route</a>' if route_maps else ""
+        return f"""
+          {fee_html}
+          <p><strong>Pickup:</strong><br>{esc(pickup_address or 'Address pending')}</p>
+          <p><strong>Customer:</strong><br>{esc(customer_address or 'Address pending')}</p>
+          <div class="actions">
+            <a class="button ghost" target="_blank" rel="noopener" href="{esc(pickup_maps)}">Pickup map</a>
+            <a class="button ghost" target="_blank" rel="noopener" href="{esc(customer_maps)}">Customer map</a>
+            {route_button}
+          </div>
+        """
+
     offer_rows = "".join(
         f"""
         <tr>
           <td><strong>{esc(o.get('pedido_num'))}</strong><br>{badge(o.get('pedido_estado'))}</td>
-          <td><strong>{esc(o.get('pickup_codigo') or '')}</strong><br><span class="muted">{esc(o.get('pickup_direccion') or '')}</span></td>
+          <td><strong>{esc(o.get('pickup_codigo') or '')}</strong>{trip_details(o)}</td>
           <td>{esc(o.get('distance_km'))} km<br><span class="muted">{esc(o.get('eta_seconds'))} sec</span></td>
           <td>{badge(o.get('status'))}<br><span class="muted">{esc(o.get('expires_at'))}</span></td>
           <td>
@@ -489,7 +554,7 @@ def driver_app_dashboard(account_id: int, flash: str = "") -> HTMLResponse:
         <tr>
           <td><strong>{esc(a.get('pedido_num'))}</strong><br>{badge(a.get('pedido_estado'))}</td>
           <td>{badge(a.get('status'))}<br><span class="muted">{esc(a.get('assigned_at'))}</span></td>
-          <td>S/ {esc(a.get('fee'))}</td>
+          <td>{trip_details(a)}</td>
           <td class="code">{esc(a.get('driver_latitude'))}, {esc(a.get('driver_longitude'))}<br><span class="muted">{esc(a.get('driver_location_at') or '')}</span></td>
           <td>{assignment_actions(a)}</td>
         </tr>
@@ -541,11 +606,11 @@ def driver_app_dashboard(account_id: int, flash: str = "") -> HTMLResponse:
     </div>
     <section class="panel">
       <h2>Offers</h2>
-      <table><thead><tr><th>Order</th><th>Pickup</th><th>Distance</th><th>Status</th><th>Action</th></tr></thead><tbody>{offer_rows}</tbody></table>
+      <table><thead><tr><th>Order</th><th>Trip and fee</th><th>Distance to pickup</th><th>Status</th><th>Action</th></tr></thead><tbody>{offer_rows}</tbody></table>
     </section>
     <section class="panel">
       <h2>Current assignment</h2>
-      <table><thead><tr><th>Order</th><th>Status</th><th>Fee</th><th>Location</th><th>Action</th></tr></thead><tbody>{assignment_rows}</tbody></table>
+      <table><thead><tr><th>Order</th><th>Status</th><th>Trip and fee</th><th>Driver location</th><th>Action</th></tr></thead><tbody>{assignment_rows}</tbody></table>
     </section>
     """
     return layout("Driver App", body, flash=flash)

@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import quote
 
 import requests
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
@@ -34,6 +34,7 @@ CHECKOUT_RATE_LIMIT = max(1, int(os.environ.get("CHECKOUT_RATE_LIMIT", "8")))
 CHECKOUT_RATE_WINDOW = max(60, int(os.environ.get("CHECKOUT_RATE_WINDOW", "900")))
 PAYMENT_RECEIPT_DIR = Path(os.environ.get("PAYMENT_RECEIPT_DIR", "/home/guill/.openclaw/workspace/replau_payment_receipts")).resolve()
 PAYMENT_PROOF_MAX_BYTES = max(1024, int(os.environ.get("PAYMENT_PROOF_MAX_BYTES", str(8 * 1024 * 1024))))
+OPENCLAW_CONFIG_PATH = Path(os.environ.get("OPENCLAW_CONFIG_PATH", "/home/guill/.openclaw/openclaw.json"))
 PAYMENT_PROOF_TYPES = {
     "image/jpeg": (".jpg", "image"),
     "image/png": (".png", "image"),
@@ -45,6 +46,30 @@ app = FastAPI(title="Replau Public Storefront", docs_url=None, redoc_url=None, o
 _checkout_lock = threading.Lock()
 _checkout_attempts: dict[str, deque[float]] = defaultdict(deque)
 _checkout_results: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def load_google_maps_api_key() -> str:
+    direct = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+    if direct:
+        return direct
+    try:
+        config = json.loads(OPENCLAW_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    for path in (
+        ("skills", "entries", "goplaces", "apiKey"),
+        ("plugins", "entries", "google", "config", "mapsApiKey"),
+        ("plugins", "entries", "google", "config", "apiKey"),
+    ):
+        node: Any = config
+        for key in path:
+            node = node.get(key) if isinstance(node, dict) else None
+        if isinstance(node, str) and node.strip():
+            return node.strip()
+    return ""
+
+
+GOOGLE_MAPS_API_KEY = load_google_maps_api_key()
 
 
 class CheckoutItem(BaseModel):
@@ -279,6 +304,44 @@ def api_store_status() -> JSONResponse:
     return JSONResponse({"ok": True, "accepting_orders": bool(status.get("accepting_orders", True)), "customer_message": str(status.get("customer_message") or "")})
 
 
+@app.get("/api/reverse-geocode")
+def api_reverse_geocode(
+    latitude: float = Query(ge=-90, le=90),
+    longitude: float = Query(ge=-180, le=180),
+) -> JSONResponse:
+    try:
+        if GOOGLE_MAPS_API_KEY:
+            response = requests.get(
+                "https://maps.googleapis.com/maps/api/geocode/json",
+                params={
+                    "latlng": f"{latitude},{longitude}",
+                    "language": "es",
+                    "region": "pe",
+                    "key": GOOGLE_MAPS_API_KEY,
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
+        else:
+            response = requests.get(
+                "https://nominatim.openstreetmap.org/reverse",
+                params={"lat": latitude, "lon": longitude, "format": "jsonv2", "accept-language": "es"},
+                headers={"User-Agent": "ReplauStorefront/1.0 (orders.replau.com)"},
+                timeout=REQUEST_TIMEOUT,
+            )
+        response.raise_for_status()
+        result = response.json()
+    except (requests.RequestException, ValueError):
+        return JSONResponse({"ok": False, "error": "No pudimos consultar la dirección."}, status_code=502)
+    if GOOGLE_MAPS_API_KEY:
+        matches = result.get("results") if result.get("status") == "OK" else []
+        address = str(matches[0].get("formatted_address") or "").strip() if matches else ""
+    else:
+        address = str(result.get("display_name") or "").strip()
+    if not address:
+        return JSONResponse({"ok": False, "error": "No encontramos una dirección para esta ubicación."}, status_code=422)
+    return JSONResponse({"ok": True, "address": address})
+
+
 @app.post("/api/checkout")
 def api_checkout(payload: CheckoutRequest, request: Request) -> JSONResponse:
     if payload.website:
@@ -499,7 +562,7 @@ function openCheckout(){{const rows=selected();if(!rows.length){{alert('Agrega a
 function closeCheckout(){{if(submitting)return;document.getElementById('checkoutModal').classList.remove('open');document.body.classList.remove('cart-open')}}
 function setFulfillment(value){{fulfillment=value;document.getElementById('deliveryChoice').classList.toggle('active',value==='DELIVERY');document.getElementById('pickupChoice').classList.toggle('active',value==='PICKUP');document.getElementById('deliveryFields').hidden=value==='PICKUP'}}
 function showError(message){{const el=document.getElementById('checkoutError');el.textContent=message;el.style.display='block';el.scrollIntoView({{behavior:'smooth',block:'nearest'}})}}
-function useLocation(){{if(!navigator.geolocation){{showError('Tu navegador no permite obtener la ubicación.');return}}const button=document.getElementById('locationButton');button.textContent='Obteniendo ubicación…';navigator.geolocation.getCurrentPosition(position=>{{coords={{latitude:position.coords.latitude,longitude:position.coords.longitude}};button.textContent='✅ Ubicación agregada'}},()=>{{button.textContent='📍 Agregar mi ubicación actual';showError('No pudimos obtener tu ubicación. Puedes continuar escribiendo la dirección.')}},{{enableHighAccuracy:true,timeout:10000,maximumAge:60000}})}}
+function useLocation(){{if(!navigator.geolocation){{showError('Tu navegador no permite obtener la ubicación.');return}}const button=document.getElementById('locationButton'),address=document.getElementById('checkoutAddress');button.disabled=true;button.textContent='Obteniendo ubicación…';navigator.geolocation.getCurrentPosition(async position=>{{coords={{latitude:position.coords.latitude,longitude:position.coords.longitude}};button.textContent='Buscando dirección…';try{{const response=await fetch(`/api/reverse-geocode?latitude=${{encodeURIComponent(coords.latitude)}}&longitude=${{encodeURIComponent(coords.longitude)}}`),data=await response.json();if(!response.ok||!data.ok||!data.address)throw new Error(data.error||'No encontramos la dirección.');address.value=data.address;address.dispatchEvent(new Event('input',{{bubbles:true}}));document.getElementById('checkoutError').style.display='none';button.textContent='✅ Dirección agregada'}}catch(error){{button.textContent='📍 Intentar ubicación nuevamente';showError(`${{error.message}} Escribe o corrige la dirección para continuar.`)}}finally{{button.disabled=false}}}},()=>{{button.disabled=false;button.textContent='📍 Agregar mi ubicación actual';showError('No pudimos obtener tu ubicación. Puedes continuar escribiendo la dirección.')}},{{enableHighAccuracy:true,timeout:10000,maximumAge:60000}})}}
 function newKey(){{return (crypto.randomUUID?crypto.randomUUID():`${{Date.now()}}-${{Math.random()}}`)+'-'+Date.now()}}
 async function placeOrder(){{if(submitting)return;const name=document.getElementById('checkoutName').value.trim(),phone=document.getElementById('checkoutPhone').value.trim(),address=document.getElementById('checkoutAddress').value.trim();if(name.length<2){{showError('Escribe tu nombre.');return}}if(phone.replace(/\\D/g,'').length<9){{showError('Ingresa un número de WhatsApp válido.');return}}if(fulfillment==='DELIVERY'&&address.length<8){{showError('Ingresa tu dirección completa.');return}}submitting=true;const button=document.getElementById('placeOrder');button.disabled=true;button.textContent='Creando pedido…';document.getElementById('checkoutError').style.display='none';let key=sessionStorage.getItem('replau-checkout-key');if(!key){{key=newKey();sessionStorage.setItem('replau-checkout-key',key)}}try{{const response=await fetch('/api/checkout',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{customer_name:name,phone,fulfillment,address,latitude:coords.latitude,longitude:coords.longitude,payment_method:document.getElementById('checkoutPayment').value,notes:document.getElementById('checkoutNotes').value.trim(),idempotency_key:key,website:document.getElementById('checkoutWebsite').value,items:selected().map(i=>({{product_id:i.id,quantity:i.qty}}))}})}});const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'No pudimos crear el pedido.');cart={{}};save();sessionStorage.removeItem('replau-checkout-key');document.getElementById('checkoutForm').hidden=true;const success=document.getElementById('checkoutSuccess');success.hidden=false;success.innerHTML=`<div class="check">✅</div><h2>Pedido ${{escapeHtml(data.order_number)}} confirmado</h2><p>Total: <strong>${{money(Number(data.total||0))}}</strong></p>${{data.tracking_url?`<a href="${{escapeHtml(data.tracking_url)}}">Seguir mi pedido</a>`:''}}<a class="secondary" href="${{escapeHtml(data.whatsapp_url)}}">Enviar datos del pedido por WhatsApp</a>`}}catch(error){{showError(error.message);submitting=false;button.disabled=false;button.textContent='Crear pedido'}}}}
 function toggleProofField(){{document.getElementById('proofField').hidden=document.getElementById('checkoutPayment').value==='CONTRA_ENTREGA'}}
