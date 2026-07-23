@@ -1,0 +1,12 @@
+[Unit]
+Description=Replau WhatsApp response SLA monitor
+After=postgrest-localapi.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/guill/.openclaw/workspace/replau/replau_ops_package
+EnvironmentFile=/home/guill/.config/replau/ops.env
+ExecStart=/home/guill/.local/share/replau/services/ops-venv/bin/python replau_sla_monitor.py
+NoNewPrivileges=true
+PrivateTmp=true
+

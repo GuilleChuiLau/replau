@@ -113,3 +113,11 @@ The contract test always rolls back and never sends a WhatsApp message. Delivery
 
 Live delivery runs through the user service `replau-outbox.service`. It reuses the adapter's protected hook token environment, polls only `PENDING` rows, retries transient failures, and records `SENT` or `ERROR` with the adapter response.
 Outbound reply text follows the same privacy window as inbound content: 30 days for inactive open requests and 7 days for closed or blocked requests.
+
+## SLA escalation
+
+`replau-sla-monitor.timer` evaluates unread open requests every minute. It creates a warning at 10 minutes, escalates to urgent at 15 minutes, and repeats only after a 30-minute cooldown. Taking, replying to, closing, or blocking the request clears the active alert. When restaurant ordering is paused, new and repeat notifications are quieted while clearing still runs.
+
+Active alerts appear in the private inbox and are recorded in the request audit timeline. The monitor also attempts a local desktop notification and always writes its result to the systemd journal. It never sends SLA alerts through customer WhatsApp.
+
+Apply and contract-test the migration with `add_whatsapp_sla_alerts.sql` and `test_whatsapp_sla_alerts.sql`; the test always rolls back.

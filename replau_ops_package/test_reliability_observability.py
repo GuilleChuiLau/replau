@@ -82,6 +82,8 @@ class ConversationRequestQueueTests(unittest.TestCase):
             'Reply on WhatsApp',
             'Outbound delivery history',
             'idempotency_key',
+            'active_sla_alerts',
+            'SLA:</strong>',
         ):
             self.assertIn(marker, DASHBOARD_SOURCE)
 
@@ -102,6 +104,7 @@ class ConversationRequestQueueTests(unittest.TestCase):
         self.assertEqual(2,metrics["open"])
         self.assertEqual(1,metrics["unread"])
         self.assertEqual(1,metrics["waiting"])
+        self.assertEqual(0,metrics["warning"])
         self.assertEqual(180,metrics["avg_response_seconds"])
 
     def test_staff_inbox_renders_operational_context(self) -> None:
@@ -115,10 +118,10 @@ class ConversationRequestQueueTests(unittest.TestCase):
             "note_count":1,"latest_note":"Call customer","latest_note_author":"Memo",
         }
         request=Request({"type":"http","method":"GET","path":"/conversation-requests","query_string":b"","headers":[]})
-        with patch.object(dashboard,"conversation_requests",return_value={"ok":True,"data":[row]}), patch.object(dashboard,"canned_replies",return_value={"ok":True,"data":[{"code":"menu","label":"Menú","message_text":"Nuestro menú"}]}):
+        with patch.object(dashboard,"conversation_requests",return_value={"ok":True,"data":[row]}), patch.object(dashboard,"canned_replies",return_value={"ok":True,"data":[{"code":"menu","label":"Menú","message_text":"Nuestro menú"}]}), patch.object(dashboard,"active_sla_alerts",return_value={"ok":True,"data":[{"level":"URGENT","sender_name":"Ana","wait_minutes":20,"assigned_to":None}]}):
             response=dashboard.conversation_requests_page(request)
         body=response.body.decode()
-        for marker in ("WhatsApp Staff Inbox","PED-1","Call customer","Waiting 15m+","MARK_READ","Reply on WhatsApp","Nuestro menú","Outbound delivery history"):
+        for marker in ("WhatsApp Staff Inbox","PED-1","Call customer","Waiting 15m+","MARK_READ","Reply on WhatsApp","Nuestro menú","Outbound delivery history","URGENT SLA:"):
             self.assertIn(marker,body)
 
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Evaluate Replau WhatsApp SLAs every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Persistent=true
+Unit=replau-sla-monitor.service
+
+[Install]
+WantedBy=timers.target

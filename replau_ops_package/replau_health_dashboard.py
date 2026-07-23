@@ -171,6 +171,8 @@ def canned_replies():
     return pg("/whatsapp_canned_replies?active=eq.true&select=code,label,message_text&order=sort_order.asc,label.asc")
 def conversation_replies(request_id:int):
     return pg(f"/v_whatsapp_request_replies?conversation_request_id=eq.{request_id}&select=*&order=id.desc&limit=100")
+def active_sla_alerts():
+    return pg("/v_whatsapp_sla_alerts?status=eq.ACTIVE&select=*&order=level.desc,wait_minutes.desc")
 def conversation_inbox_metrics(rows):
     local_today=datetime.now(ZoneInfo(BUSINESS_TZ)).date()
     def local_date(value):
@@ -182,6 +184,7 @@ def conversation_inbox_metrics(rows):
         "open":len(open_rows),
         "unread":sum(bool(row.get("is_unread")) for row in open_rows),
         "waiting":sum(int(row.get("wait_minutes") or 0)>=15 for row in open_rows),
+        "warning":sum(10<=int(row.get("wait_minutes") or 0)<15 and bool(row.get("is_unread")) for row in open_rows),
         "urgent":sum(row.get("priority")=="URGENT" for row in open_rows),
         "new_today":sum(local_date(row.get("first_inbound_at"))==local_today for row in rows),
         "resolved_today":sum(local_date(row.get("resolved_at"))==local_today for row in rows),
@@ -752,9 +755,12 @@ def conversation_requests_page(req:Request,x_ops_token:Optional[str]=Header(defa
     all_result=conversation_requests()
     template_result=canned_replies()
     templates=template_result.get("data",[]) if template_result.get("ok") else []
+    alert_result=active_sla_alerts()
+    alerts=alert_result.get("data",[]) if alert_result.get("ok") else []
     metrics=conversation_inbox_metrics(all_result["data"] if all_result["ok"] else result.get("data",[]))
     flash=req.query_params.get("flash","")
     flash_html=f'<div class="flash">{esc(flash)}</div>' if flash else ""
+    alert_html="".join(f'''<div class="flash {'badline' if a.get('level')=='URGENT' else ''}"><strong>{esc(a.get('level'))} SLA:</strong> {esc(a.get('sender_name') or 'WhatsApp customer')} waiting {esc(a.get('wait_minutes'))} minutes · assigned to {esc(a.get('assigned_to') or 'nobody')}</div>''' for a in alerts)
     if not result["ok"]:
         rows_html=f'<div class="flash badline">Queue unavailable: {esc(result.get("error"))}</div>'
     else:
@@ -768,6 +774,7 @@ def conversation_requests_page(req:Request,x_ops_token:Optional[str]=Header(defa
             response="—" if row.get("response_seconds") is None else f'{round(int(row.get("response_seconds"))/60,1)} min'
             rows.append(f'''<article class="request{unread_class}{urgency}"><div class="request-head"><div><span class="priority {esc(str(row.get("priority") or "NORMAL").lower())}">{esc(row.get("priority") or "NORMAL")}</span> <span class="status">{esc(str(row.get("status") or "").replace("_"," "))}</span>{' <span class="new">UNREAD</span>' if row.get("is_unread") else ''}<h2>{esc(row.get("sender_name") or "Unknown customer")}</h2><div class="muted">{esc(row.get("customer_address"))} · {esc(row.get("inbound_count"))} inbound message(s)</div></div><div class="wait"><strong>{wait} min</strong><span>waiting</span></div></div><div class="request-grid"><section><h3>Latest message</h3><p>{esc(row.get("last_message_text") or "Content redacted by retention")}</p><div class="muted">First contact: {esc(row.get("first_inbound_at"))}<br>Last inbound: {esc(row.get("last_inbound_at"))}<br>First response: {esc(response)}</div><p><a class="link" href="/api/conversation-requests/{int(row.get('id'))}/replies{token_query(req)}" target="_blank">Outbound delivery history</a></p></section><section><h3>Ownership</h3><p><strong>{esc(row.get("assigned_to") or "Unassigned")}</strong></p><div class="muted">Assigned: {esc(row.get("assigned_at") or "—")}<br>SLA due: {esc(row.get("sla_due_at") or "—")}</div><h3>Latest order</h3>{order_html}</section><section>{inbox_reply_form(row,req,templates)}<h3>Internal notes</h3>{note_html}<p><a class="link" href="/api/conversation-requests/{int(row.get('id'))}/notes{token_query(req)}" target="_blank">All notes</a> · <a class="link" href="/api/conversation-requests/{int(row.get('id'))}/events{token_query(req)}" target="_blank">Audit timeline</a></p>{inbox_action_form(row,req)}</section></div></article>''')
         rows_html="".join(rows) if rows else '<div class="empty">No requests match these filters.</div>'
+    rows_html=alert_html+rows_html
     status_options='<option value="">All statuses</option>'+"".join(f'<option value="{value}" {"selected" if status==value else ""}>{value.replace("_"," ").title()}</option>' for value in ("AUTO_STARTED","IN_PROGRESS","CLOSED","BLOCKED"))
     priority_options='<option value="">All priorities</option>'+"".join(f'<option value="{value}" {"selected" if priority==value else ""}>{value.title()}</option>' for value in ("NORMAL","HIGH","URGENT"))
     token_hidden=f'<input type="hidden" name="token" value="{esc(req.query_params.get("token"))}">' if req.query_params.get("token") else ""
