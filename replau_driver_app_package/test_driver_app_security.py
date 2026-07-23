@@ -44,6 +44,7 @@ def test_valid_auth_reaches_driver_route(monkeypatch):
     response = client.get("/driver", headers=basic("driver-test", "correct-horse-test"))
     assert response.status_code == 200
     assert "Replau Driver" in response.text
+    assert "useCurrentLocation" in response.text
 
 
 def test_health_stays_available_without_driver_credentials(monkeypatch):

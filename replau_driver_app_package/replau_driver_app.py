@@ -234,6 +234,31 @@ def layout(title: str, body: str, *, auth_query: str = "", flash: str = "") -> H
     {flash_html}
     {body}
   </div>
+  <script>
+    function useCurrentLocation(button) {{
+      if (!navigator.geolocation) {{
+        window.alert("Location is not supported by this browser.");
+        return;
+      }}
+      button.disabled = true;
+      button.textContent = "Locating...";
+      navigator.geolocation.getCurrentPosition(
+        function(position) {{
+          const form = button.closest("form");
+          form.querySelector('input[name="latitude"]').value = position.coords.latitude.toFixed(7);
+          form.querySelector('input[name="longitude"]').value = position.coords.longitude.toFixed(7);
+          button.disabled = false;
+          button.textContent = "Location ready";
+        }},
+        function(error) {{
+          button.disabled = false;
+          button.textContent = "Use current location";
+          window.alert("Could not read location: " + error.message);
+        }},
+        {{ enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }}
+      );
+    }}
+  </script>
 </body>
 </html>""")
 
@@ -479,12 +504,14 @@ def driver_app_dashboard(account_id: int, flash: str = "") -> HTMLResponse:
         <input type="hidden" name="session_id" value="{esc(session.get('id'))}">
         <label>Latitude <input name="latitude" placeholder="-12.1111" required></label>
         <label>Longitude <input name="longitude" placeholder="-77.0300" required></label>
+        <button class="ghost" type="button" onclick="useCurrentLocation(this)">Use current location</button>
         <button type="submit">Update location</button>
       </form>
     """ if online else f"""
       <form method="post" action="/driver/app/{account_id}/online">
         <label>Latitude <input name="latitude" placeholder="-12.1111"></label>
         <label>Longitude <input name="longitude" placeholder="-77.0300"></label>
+        <button class="ghost" type="button" onclick="useCurrentLocation(this)">Use current location</button>
         <button class="good" type="submit" {'disabled' if not approved else ''}>Go online</button>
       </form>
     """
