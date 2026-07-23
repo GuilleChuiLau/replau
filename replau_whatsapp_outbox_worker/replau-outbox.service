@@ -1,0 +1,21 @@
+[Unit]
+Description=Replau WhatsApp Transactional Outbox Worker
+After=network.target replau-adapter.service postgrest-localapi.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/guill/.openclaw/workspace/replau/replau_whatsapp_outbox_worker
+EnvironmentFile=/home/guill/.config/replau/adapter.env
+Environment=POSTGREST_BASE_URL=http://127.0.0.1:3000
+Environment=OPENCLAW_SEND_URL=http://127.0.0.1:8792/send/whatsapp
+Environment=WHATSAPP_DRY_RUN=false
+Environment=POLL_SECONDS=5
+Environment=MAX_ATTEMPTS=5
+ExecStart=/home/guill/.local/share/replau/services/ops-venv/bin/python whatsapp_outbox_worker.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

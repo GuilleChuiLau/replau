@@ -15,7 +15,7 @@ POSTGREST_BASE_URL = os.environ.get("POSTGREST_BASE_URL", "http://127.0.0.1:3000
 # OpenClaw outbound sender endpoint.
 # You will configure this when your OpenClaw side has a send-message route.
 OPENCLAW_SEND_URL = os.environ.get("OPENCLAW_SEND_URL", "").strip()
-OPENCLAW_HOOK_TOKEN = os.environ.get("OPENCLAW_HOOK_TOKEN", "RESTRICTED")
+OPENCLAW_HOOK_TOKEN = os.environ.get("OPENCLAW_HOOK_TOKEN", os.environ.get("HOOK_TOKEN", "RESTRICTED"))
 
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
 BATCH_LIMIT = int(os.environ.get("BATCH_LIMIT", "10"))

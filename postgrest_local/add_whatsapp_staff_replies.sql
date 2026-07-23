@@ -50,7 +50,22 @@ END $$;
 CREATE OR REPLACE VIEW api.v_whatsapp_request_replies AS
 SELECT o.id,o.conversation_request_id,o.message_text,o.staff_actor,o.status,o.attempts,o.created_at,o.sent_at,o.error_message
 FROM api.whatsapp_outbox o WHERE o.event_type='STAFF_REPLY';
+CREATE OR REPLACE FUNCTION api.apply_whatsapp_staff_reply_retention(p_active_redact_days integer DEFAULT 30,p_closed_redact_days integer DEFAULT 7,p_now timestamptz DEFAULT now())
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=api,public AS $$
+DECLARE v_redacted integer:=0;
+BEGIN
+ IF p_active_redact_days NOT BETWEEN 7 AND 3650 THEN RAISE EXCEPTION 'active redact days must be between 7 and 3650'; END IF;
+ IF p_closed_redact_days NOT BETWEEN 1 AND 3650 THEN RAISE EXCEPTION 'closed redact days must be between 1 and 3650'; END IF;
+ UPDATE api.whatsapp_outbox o SET message_text='[redacted by retention]',updated_at=p_now
+ FROM api.whatsapp_conversation_requests r
+ WHERE o.conversation_request_id=r.id AND o.event_type='STAFF_REPLY' AND o.message_text<>'[redacted by retention]' AND (
+  (r.status IN('AUTO_STARTED','IN_PROGRESS') AND r.last_inbound_at<p_now-make_interval(days=>p_active_redact_days)) OR
+  (r.status IN('CLOSED','BLOCKED') AND GREATEST(r.last_inbound_at,r.status_updated_at)<p_now-make_interval(days=>p_closed_redact_days)));
+ GET DIAGNOSTICS v_redacted=ROW_COUNT;
+ RETURN jsonb_build_object('ok',true,'staff_replies_redacted',v_redacted,'applied_at',p_now);
+END $$;
 GRANT SELECT ON api.whatsapp_canned_replies,api.v_whatsapp_request_replies TO web_anon;
 GRANT EXECUTE ON FUNCTION api.enqueue_whatsapp_staff_reply(bigint,text,text,text) TO web_anon;
+GRANT EXECUTE ON FUNCTION api.apply_whatsapp_staff_reply_retention(integer,integer,timestamptz) TO web_anon;
 NOTIFY pgrst,'reload schema';
 COMMIT;

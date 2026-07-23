@@ -110,3 +110,6 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 -d localapi \
 ```
 
 The contract test always rolls back and never sends a WhatsApp message. Delivery status is available from each request's **Outbound delivery history** link.
+
+Live delivery runs through the user service `replau-outbox.service`. It reuses the adapter's protected hook token environment, polls only `PENDING` rows, retries transient failures, and records `SENT` or `ERROR` with the adapter response.
+Outbound reply text follows the same privacy window as inbound content: 30 days for inactive open requests and 7 days for closed or blocked requests.

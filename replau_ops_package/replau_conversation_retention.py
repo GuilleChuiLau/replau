@@ -24,6 +24,15 @@ def run() -> dict:
     delete_days = retention_days("WHATSAPP_REQUEST_DELETE_DAYS", 90, 30)
     if delete_days <= closed_days:
         raise ValueError("WHATSAPP_REQUEST_DELETE_DAYS must exceed WHATSAPP_REQUEST_CLOSED_REDACT_DAYS")
+    staff_response = requests.post(
+        f"{base_url}/rpc/apply_whatsapp_staff_reply_retention",
+        json={"p_active_redact_days": active_days, "p_closed_redact_days": closed_days},
+        timeout=30,
+    )
+    staff_response.raise_for_status()
+    staff_result = staff_response.json()
+    if not isinstance(staff_result, dict) or staff_result.get("ok") is not True:
+        raise RuntimeError("staff reply retention RPC returned an invalid result")
     response = requests.post(
         f"{base_url}/rpc/apply_whatsapp_conversation_request_retention",
         json={
@@ -37,7 +46,7 @@ def run() -> dict:
     result = response.json()
     if not isinstance(result, dict) or result.get("ok") is not True:
         raise RuntimeError("retention RPC returned an invalid result")
-    return result
+    return {**result, **staff_result}
 
 
 if __name__ == "__main__":
