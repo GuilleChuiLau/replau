@@ -3100,7 +3100,7 @@ def active_driver_assignment(driver: Dict[str, Any]) -> Optional[Dict[str, Any]]
     safe_driver_id = quote(str(driver.get("id") or ""), safe="")
     assignments = pg_get(
         f"/v_delivery_asignaciones?repartidor_id=eq.{safe_driver_id}"
-        "&status=in.(ASSIGNED,ACCEPTED,OFFERED)&order=assigned_at.desc.nullslast,offered_at.desc,created_at.desc&limit=1"
+        "&status=in.(ASSIGNED,ACCEPTED,OFFERED,PICKED_UP,EN_ROUTE,ARRIVED)&order=assigned_at.desc.nullslast,offered_at.desc,created_at.desc&limit=1"
     )
     return assignments[0] if assignments else None
 
@@ -3125,6 +3125,14 @@ def append_assignment_note(assignment: Dict[str, Any], note: str) -> None:
     existing = str(assignment.get("notes") or "").strip()
     updated = f"{existing}\n{note}" if existing else note
     pg_patch(f"/delivery_asignaciones?id=eq.{quote(str(assignment.get('id')), safe='')}", {"notes": updated})
+
+def driver_delivery_transition(inbound: NormalizedWebhook, assignment: Dict[str, Any], action: str) -> Dict[str, Any]:
+    raw=inbound.raw_payload or {}
+    seed=str(raw.get("message_id") or f"{inbound.whatsapp_number}:{inbound.message_text}:{action}")
+    key=f"driver-{assignment.get('id')}-{action.lower()}-{hashlib.sha256(seed.encode()).hexdigest()[:24]}"
+    return pg_post("/rpc/update_delivery_operation",{
+        "p_assignment_id":assignment.get("id"),"p_action":action,"p_actor":f"driver-{assignment.get('repartidor_codigo') or assignment.get('repartidor_id')}",
+        "p_reason":None,"p_priority":None,"p_promised_at":None,"p_idempotency_key":key})
 
 
 def update_driver_pickup_or_arrival(inbound: NormalizedWebhook, driver: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -3151,17 +3159,12 @@ def update_driver_pickup_or_arrival(inbound: NormalizedWebhook, driver: Dict[str
         tracking_url = ""
 
     if is_pickup:
-        append_assignment_note(assignment, "EN_CAMINO: repartidor confirmó recojo/salida del restaurante")
-        customer_text = f"Tu pedido {pedido_num} ya fue recogido y está en camino 🛵"
-        if tracking_url:
-            customer_text += f"\n\nTracking: {tracking_url}"
-        queue_customer_delivery_update(pedido_id, customer_text)
+        driver_delivery_transition(inbound,assignment,"EN_ROUTE")
         text = f"Salida confirmada ✅\n\n{pedido_num} quedó como EN CAMINO."
         log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", text)
         return reply(text, next_state="DRIVER_ON_THE_WAY", driver=True, dispatch={"pedido_id": pedido_id, "pedido_num": pedido_num, "assignment_id": assignment.get("id")})
 
-    append_assignment_note(assignment, "LLEGO_DESTINO: repartidor confirmó llegada al punto de entrega")
-    queue_customer_delivery_update(pedido_id, f"Tu pedido {pedido_num} ya llegó al punto de entrega 📍\n\nPor favor acércate/atiende al repartidor.")
+    driver_delivery_transition(inbound,assignment,"ARRIVE")
     text = f"Llegada confirmada ✅\n\nAvisé al cliente que {pedido_num} ya llegó."
     log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", text)
     return reply(text, next_state="DRIVER_ARRIVED", driver=True, dispatch={"pedido_id": pedido_id, "pedido_num": pedido_num, "assignment_id": assignment.get("id")})
@@ -3178,24 +3181,15 @@ def complete_driver_delivery(inbound: NormalizedWebhook, driver: Dict[str, Any])
 
     pedido_id = assignment.get("pedido_id")
     pedido_num = assignment.get("pedido_num") or "pedido"
-    pg_patch(f"/delivery_asignaciones?id=eq.{quote(str(assignment.get('id')), safe='')}", {"status": "COMPLETED", "completed_at": datetime.now(timezone.utc).isoformat()})
-    pg_patch(f"/pedidos?id=eq.{quote(str(pedido_id), safe='')}", {"estado": "ENTREGADO"})
-
     try:
-        rows = pg_get(f"/v_pedidos_logistica?id=eq.{quote(str(pedido_id), safe='')}&select=whatsapp_number,cliente_nombre,pedido_num&limit=1")
-        if rows and rows[0].get("whatsapp_number"):
-            pg_post(
-                "/whatsapp_outbox",
-                {
-                    "pedido_id": pedido_id,
-                    "whatsapp_number": rows[0]["whatsapp_number"],
-                    "message_text": f"Tu pedido {pedido_num} fue entregado ✅\n\nGracias por comprar en Replau.",
-                    "event_type": "CUSTOM",
-                    "status": "PENDING",
-                },
-            )
+        driver_delivery_transition(inbound,assignment,"DELIVER")
+    except requests.HTTPError as exc:
+        text="No pude completar la entrega. Confirma primero el cobro/pago en Logistics."
+        log_whatsapp_message(inbound.whatsapp_number,"OUTBOUND","text",text)
+        return reply(text,next_state="DRIVER_DELIVERY_BLOCKED",driver=True,dispatch={"pedido_id":pedido_id,"assignment_id":assignment.get("id"),"error":str(exc)})
     except Exception as exc:
-        logging.warning("Could not queue customer delivery confirmation for %s: %s", pedido_num, exc)
+        logging.warning("Could not complete driver delivery %s: %s",pedido_num,exc)
+        raise
 
     text = f"Entrega confirmada ✅\n\n{pedido_num} quedó marcado como ENTREGADO."
     log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", text)

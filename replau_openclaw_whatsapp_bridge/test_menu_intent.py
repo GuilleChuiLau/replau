@@ -27,6 +27,22 @@ class MenuIntentTest(unittest.TestCase):
     def test_does_not_match_unrelated_text(self):
         self.assertFalse(self.bridge.is_menu_request("Quiero dos hamburguesas"))
 
+    def test_driver_route_updates_use_integrated_delivery_rpc(self):
+        inbound=self.bridge.NormalizedWebhook(whatsapp_number="51900000000",message_text="sali",raw_payload={"message_id":"wamid.route.1"})
+        assignment={"id":77,"pedido_id":42,"pedido_num":"PED-42","repartidor_id":3,"repartidor_codigo":"R003","status":"ASSIGNED"}
+        with patch.object(self.bridge,"active_driver_assignment",return_value=assignment), patch.object(self.bridge,"pg_get",return_value=[{"order_url":"https://orders.replau.com/order/PED-42?token=x"}]), patch.object(self.bridge,"driver_delivery_transition",return_value={"ok":True}) as transition, patch.object(self.bridge,"log_whatsapp_message"):
+            result=self.bridge.update_driver_pickup_or_arrival(inbound,{"id":3})
+        transition.assert_called_once_with(inbound,assignment,"EN_ROUTE")
+        self.assertEqual(result["next_state"],"DRIVER_ON_THE_WAY")
+
+    def test_driver_completion_uses_payment_gated_delivery_rpc(self):
+        inbound=self.bridge.NormalizedWebhook(whatsapp_number="51900000000",message_text="entregado",raw_payload={"message_id":"wamid.deliver.1"})
+        assignment={"id":77,"pedido_id":42,"pedido_num":"PED-42","repartidor_id":3,"repartidor_codigo":"R003","status":"ARRIVED"}
+        with patch.object(self.bridge,"active_driver_assignment",return_value=assignment), patch.object(self.bridge,"driver_delivery_transition",return_value={"ok":True}) as transition, patch.object(self.bridge,"log_whatsapp_message"):
+            result=self.bridge.complete_driver_delivery(inbound,{"id":3})
+        transition.assert_called_once_with(inbound,assignment,"DELIVER")
+        self.assertEqual(result["next_state"],"DRIVER_DELIVERED")
+
     def test_registers_user_initiated_request_with_channel_identity(self):
         inbound = self.bridge.NormalizedWebhook(
             whatsapp_number="51999999999",

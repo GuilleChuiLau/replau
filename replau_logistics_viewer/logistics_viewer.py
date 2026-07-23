@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import html
 import json
+import secrets
 import time
 import fcntl
 from collections import Counter
@@ -11,7 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import quote, urlparse, parse_qs
+from urllib.parse import quote, urlparse, parse_qs, urlencode
 
 import requests
 from fastapi import FastAPI, HTTPException, Query, Form
@@ -112,6 +113,13 @@ def product_admin_url(path: str = "") -> str:
 
 def ops_dashboard_url() -> str:
     return tokenized_local_service_url(OPS_DASHBOARD_URL, "replau_health_dashboard.py", "OPS_TOKEN")
+
+def ops_inbox_url(whatsapp_number: Any) -> str:
+    parsed=urlparse(ops_dashboard_url())
+    query=parse_qs(parsed.query,keep_blank_values=True)
+    query["q"]=[clean_phone_digits(whatsapp_number)]
+    flat=[(key,value) for key,values in query.items() for value in values]
+    return f"{parsed.scheme}://{parsed.netloc}/conversation-requests?{urlencode(flat)}"
 
 
 def erp_nav() -> str:
@@ -1792,6 +1800,30 @@ def delivery_route_url(order: Dict[str, Any], assignment: Dict[str, Any] | None 
         return url
     return str(order.get("maps_url") or "")
 
+def delivery_operation_actions_html(assignment: Dict[str, Any] | None, next_url: str = "/ops/delivery") -> str:
+    if not assignment or not assignment.get("id"):
+        return '<div class="warning">Asigna un repartidor antes de registrar el recorrido.</div>'
+    aid=int(assignment["id"])
+    status=str(assignment.get("status") or "")
+    allowed={
+        "PICKUP":status in {"ASSIGNED","ACCEPTED"},
+        "EN_ROUTE":status in {"ASSIGNED","ACCEPTED","PICKED_UP"},
+        "ARRIVE":status=="EN_ROUTE",
+        "DELIVER":status in {"PICKED_UP","EN_ROUTE","ARRIVED"},
+        "FAIL":status in {"OFFERED","ACCEPTED","ASSIGNED","PICKED_UP","EN_ROUTE","ARRIVED"},
+        "REOPEN":status in {"FAILED","CANCELLED"},
+    }
+    def form(action,label,css="secondary",reason=False):
+        if not allowed.get(action): return ""
+        key="delivery-ui-"+secrets.token_urlsafe(18)
+        reason_input='<input name="reason" maxlength="500" placeholder="Motivo obligatorio" required>' if reason else ''
+        confirm=f' onsubmit="return confirm(\'¿Confirmar {esc(label)}?\');"'
+        return f'''<form method="post" action="/ops/delivery/transition"{confirm}><input type="hidden" name="assignment_id" value="{aid}"><input type="hidden" name="action" value="{action}"><input type="hidden" name="idempotency_key" value="{esc(key)}"><input type="hidden" name="next_url" value="{esc(next_url)}">{reason_input}<button class="button {css} driver-btn" type="submit">{esc(label)}</button></form>'''
+    priority_key="delivery-ui-"+secrets.token_urlsafe(18)
+    promise_key="delivery-ui-"+secrets.token_urlsafe(18)
+    settings=f'''<div class="dispatch-settings"><form method="post" action="/ops/delivery/transition"><input type="hidden" name="assignment_id" value="{aid}"><input type="hidden" name="action" value="SET_PRIORITY"><input type="hidden" name="idempotency_key" value="{esc(priority_key)}"><input type="hidden" name="next_url" value="{esc(next_url)}"><select name="priority"><option>NORMAL</option><option>HIGH</option><option>URGENT</option></select><button class="button secondary" type="submit">Prioridad</button></form><form method="post" action="/ops/delivery/transition"><input type="hidden" name="assignment_id" value="{aid}"><input type="hidden" name="action" value="SET_PROMISE"><input type="hidden" name="idempotency_key" value="{esc(promise_key)}"><input type="hidden" name="next_url" value="{esc(next_url)}"><input type="datetime-local" name="promised_at" required><button class="button secondary" type="submit">Hora prometida</button></form></div>'''
+    return '<div class="driver-quick-actions">'+form("PICKUP","📦 Recogido")+form("EN_ROUTE","🛵 En camino")+form("ARRIVE","📍 Llegando")+form("DELIVER","✅ Entregado","good")+form("FAIL","⚠️ Problema","danger",True)+form("REOPEN","↩ Reabrir","warn")+'</div>'+settings
+
 
 def render_delivery_progress(order: Dict[str, Any], assignment: Dict[str, Any] | None) -> str:
     estado = str(order.get("estado") or "")
@@ -1806,11 +1838,11 @@ def render_delivery_progress(order: Dict[str, Any], assignment: Dict[str, Any] |
             f'<span class="delivery-step {"done" if done else ""}">{esc(label)}</span>'
             for label, done in steps
         )
-    notes = str((assignment or {}).get("notes") or "").upper()
     has_assignment = bool(assignment)
     has_driver_location = bool((assignment or {}).get("driver_latitude") and (assignment or {}).get("driver_longitude"))
-    is_on_the_way = "EN_CAMINO" in notes
-    arrived = "LLEGO_DESTINO" in notes
+    assignment_status=str((assignment or {}).get("status") or "")
+    is_on_the_way = assignment_status in {"EN_ROUTE","ARRIVED","COMPLETED"}
+    arrived = assignment_status in {"ARRIVED","COMPLETED"}
     completed = estado == "ENTREGADO" or str((assignment or {}).get("status") or "") == "COMPLETED"
     steps = [
         ("Despachado", estado in {"DESPACHADO", "ENTREGADO"}),
@@ -1856,15 +1888,16 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
         if is_pickup_fulfillment(order):
             return "pickup"
         status = str((assignment or {}).get("status") or "")
-        notes = str((assignment or {}).get("notes") or "").upper()
         if not assignment:
             return "unassigned"
         if status == "OFFERED":
             return "offered"
-        if "LLEGO_DESTINO" in notes:
+        if status == "ARRIVED":
             return "arrived"
-        if "EN_CAMINO" in notes or assignment.get("driver_latitude"):
+        if status in {"PICKED_UP","EN_ROUTE"}:
             return "en_route"
+        if status == "FAILED":
+            return "failed"
         return "assigned"
 
     lane_labels = {
@@ -1873,6 +1906,7 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
         "assigned": "Asignados",
         "en_route": "En camino",
         "arrived": "Llegaron",
+        "failed": "Problemas",
         "pickup": "Recojo cliente",
     }
     lane_counts = Counter()
@@ -1930,7 +1964,7 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
         maps_url = order.get("maps_url") or "#"
         route_url = delivery_route_url(order, assignment) or maps_url
         customer_chat_url = whatsapp_customer_url(order)
-        customer_chat_link = f'<a class="button secondary" href="{esc(customer_chat_url)}" target="_blank">WhatsApp cliente</a>' if customer_chat_url else ""
+        customer_chat_link = (f'<a class="button" href="{esc(ops_inbox_url(order.get("whatsapp_number")))}" target="_blank">Abrir inbox</a>' + (f'<a class="button secondary" href="{esc(customer_chat_url)}" target="_blank">WhatsApp directo</a>' if customer_chat_url else ""))
         address = order.get("direccion_confirmada") or order.get("direccion_detectada") or ""
         lane = lane_for(order, assignment)
         progress_html = render_delivery_progress(order, assignment)
@@ -1969,7 +2003,7 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
               <div class="station-meta">{esc(order.get('cliente_nombre'))} · {money(order.get('total'))}</div>
               <div class="delivery-progress">{progress_html}</div>
             </div>
-            <div class="station-badges">{badge_html(order.get('estado'))}{payment_badge_html(order.get('metodo_pago'))}{payment_fulfillment_badge(order)}{badge_html(assignment_status)}{stale_html(order.get('updated_at') or order.get('created_at'), warn_after=20, danger_after=50)}</div>
+            <div class="station-badges">{badge_html(order.get('estado'))}{payment_badge_html(order.get('metodo_pago'))}{payment_fulfillment_badge(order)}{badge_html(assignment_status)}{badge_html((assignment or {}).get('priority') or 'NORMAL')}{badge_html((assignment or {}).get('sla_level') or 'OK')}{stale_html(order.get('updated_at') or order.get('created_at'), warn_after=20, danger_after=50)}</div>
           </div>
           <div class="station-grid">
             <div>
@@ -1997,23 +2031,7 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
               {pickup_callout}
               {'' if pickup_order else render_driver_assignment_panel(order.get('id'), token)}
               {direct_assign_form}
-              <div class="driver-quick-actions">
-                <form method="post" action="/order/{pedido_num}/status">
-                  <input type="hidden" name="token" value="{esc(token)}">
-                  <input type="hidden" name="next_url" value="/ops/delivery">
-                  <button class="button secondary driver-btn" name="estado" value="DESPACHADO">🛵 Salí</button>
-                </form>
-                <form method="post" action="/order/{pedido_num}/status">
-                  <input type="hidden" name="token" value="{esc(token)}">
-                  <input type="hidden" name="next_url" value="/ops/delivery">
-                  <button class="button good driver-btn" name="estado" value="ENTREGADO">✅ Entregado</button>
-                </form>
-                <form method="post" action="/order/{pedido_num}/status" onsubmit="return confirm('¿Marcar problema en {pedido_num}? Se sacará de la cola activa como ANULADO para revisión manual.');">
-                  <input type="hidden" name="token" value="{esc(token)}">
-                  <input type="hidden" name="next_url" value="/ops/delivery">
-                  <button class="button danger driver-btn" name="estado" value="ANULADO">⚠️ Problema</button>
-                </form>
-              </div>
+              {delivery_operation_actions_html(assignment)}
               <div class="actions station-actions">
                 <a class="button" href="/ops/delivery/{pedido_num}?token={quote(token, safe='')}">Abrir pedido</a>
                 <a class="button secondary" href="/ops/delivery/{pedido_num}?token={quote(token, safe='')}#mapa">Mapa</a>
@@ -2100,6 +2118,8 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
         .pickup-callout span {{ color:#fffbeb; }}
         .pickup-handoff {{ width:100%; min-height:88px; font-size:22px; border-radius:20px; }}
         .driver-quick-actions form {{ margin:0; }}
+        .dispatch-settings {{ display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px; }}
+        .dispatch-settings form {{ display:grid;grid-template-columns:1fr auto;gap:8px; }}
         .driver-btn {{ width:100%; min-height:64px; font-size:18px; border-radius:18px; }}
         .station-actions {{ margin-top:14px; align-items:center; }}
         .station-actions.compact-actions {{ gap:8px; }}
@@ -2120,7 +2140,7 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
         .dispatch-lane-head h2 {{ margin:0; color:#f8fafc; font-size:26px; letter-spacing:-.02em; }}
         .dispatch-assign-form {{ margin-top:14px; display:grid; grid-template-columns:1fr auto; gap:10px; align-items:end; }}
         .dispatch-assign-form select {{ width:100%; min-height:46px; padding:11px; }}
-        @media(max-width:900px) {{ .station-grid, .station-card-head {{ grid-template-columns:1fr; display:block; }} .station-badges {{ justify-content:flex-start; margin-top:12px; }} .driver-quick-actions {{ grid-template-columns:1fr; }} }}
+        @media(max-width:900px) {{ .station-grid, .station-card-head {{ grid-template-columns:1fr; display:block; }} .station-badges {{ justify-content:flex-start; margin-top:12px; }} .driver-quick-actions,.dispatch-settings {{ grid-template-columns:1fr; }} }}
         @media(max-width:900px) {{ .dispatch-kpis {{ grid-template-columns:1fr 1fr; }} .dispatch-assign-form {{ grid-template-columns:1fr; }} }}
       </style>
       {cards}
@@ -2273,7 +2293,7 @@ def fetch_delivery_overview() -> Dict[str, Any]:
         drivers = []
     try:
         assignments = pg_get(
-            "/v_delivery_asignaciones?status=in.(OFFERED,ACCEPTED,ASSIGNED)"
+            "/v_delivery_asignaciones?status=in.(OFFERED,ACCEPTED,ASSIGNED,PICKED_UP,EN_ROUTE,ARRIVED,FAILED)"
             "&order=created_at.desc&limit=50"
         )
     except requests.HTTPError:
@@ -2514,7 +2534,7 @@ def fetch_delivery_assignment(pedido_id: Any) -> Dict[str, Any] | None:
     try:
         rows = pg_get(
             f"/v_delivery_asignaciones?pedido_id=eq.{pedido_id}"
-            "&status=in.(ASSIGNED,ACCEPTED,COMPLETED,OFFERED)"
+            "&status=in.(ASSIGNED,ACCEPTED,PICKED_UP,EN_ROUTE,ARRIVED,FAILED,COMPLETED,OFFERED)"
             "&order=created_at.desc&limit=1"
         )
         return rows[0] if rows else None
@@ -3304,7 +3324,7 @@ def delivery_assign_driver(pedido_num: str = Form(...), repartidor_id: int = For
 
     active = pg_get(
         f"/delivery_asignaciones?pedido_id=eq.{pedido_id}"
-        "&status=in.(OFFERED,ACCEPTED,ASSIGNED)&select=id,notes"
+        "&status=in.(OFFERED,ACCEPTED,ASSIGNED,PICKED_UP,EN_ROUTE,ARRIVED,FAILED)&select=id,notes"
     )
     for assignment in active:
         notes = delivery_assignment_notes(
@@ -3357,6 +3377,40 @@ def delivery_assign_driver(pedido_num: str = Form(...), repartidor_id: int = For
     if not created:
         raise HTTPException(status_code=500, detail="No se pudo crear la asignacion")
     return RedirectResponse(url="/ops/delivery#lane-assigned", status_code=303)
+
+
+@app.post("/ops/delivery/transition")
+def delivery_transition(
+    assignment_id: int = Form(...),
+    action: str = Form(...),
+    idempotency_key: str = Form(...),
+    reason: str = Form(""),
+    priority: str = Form(""),
+    promised_at: str = Form(""),
+    next_url: str = Form("/ops/delivery"),
+) -> RedirectResponse:
+    action=action.upper().strip()
+    if action not in {"PICKUP","EN_ROUTE","ARRIVE","DELIVER","FAIL","REOPEN","SET_PRIORITY","SET_PROMISE"}:
+        raise HTTPException(status_code=400,detail="Acción de delivery inválida")
+    if len(reason)>500 or len(idempotency_key) not in range(16,121):
+        raise HTTPException(status_code=400,detail="Datos de transición inválidos")
+    rows=pg_get(f"/delivery_asignaciones?id=eq.{assignment_id}&select=id,pedido_id&limit=1")
+    if not rows: raise HTTPException(status_code=404,detail="Asignación no encontrada")
+    if action=="DELIVER":
+        orders=pg_get(f"/v_pedidos_logistica?id=eq.{rows[0]['pedido_id']}&select=id,metodo_pago,total&limit=1")
+        if not orders: raise HTTPException(status_code=404,detail="Pedido no encontrado")
+        order=orders[0]; order["payment_fulfillment"]=fetch_payment_fulfillment(order["id"])
+        if not payment_delivery_completion_allowed(order): raise HTTPException(status_code=409,detail=payment_gate_reason(order,completing=True))
+    try:
+        result=pg_rpc("update_delivery_operation",{
+            "p_assignment_id":assignment_id,"p_action":action,"p_actor":"logistics-dashboard",
+            "p_reason":reason.strip() or None,"p_priority":priority.upper().strip() or None,
+            "p_promised_at":promised_at.strip() or None,"p_idempotency_key":idempotency_key})
+    except requests.HTTPError as exc:
+        raise HTTPException(status_code=409,detail=exc.response.text if exc.response is not None else str(exc))
+    if not result.get("ok"): raise HTTPException(status_code=409,detail=result)
+    target=next_url if next_url.startswith("/") else "/ops/delivery"
+    return RedirectResponse(url=target,status_code=303)
 
 
 @app.post("/ops/delivery/collect-cod")

@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 SOURCE = Path(__file__).with_name("logistics_viewer.py").read_text()
+MIGRATION = Path(__file__).parents[1].joinpath("postgrest_local/add_integrated_delivery_operations.sql").read_text()
 
 
 class LogisticsPaymentGateContractTests(unittest.TestCase):
@@ -46,6 +47,34 @@ class LogisticsPaymentGateContractTests(unittest.TestCase):
             'Excepciones operativas',
         ):
             self.assertIn(marker, SOURCE)
+
+    def test_integrated_delivery_lifecycle_is_used(self) -> None:
+        for marker in (
+            'def delivery_operation_actions_html(',
+            '@app.post("/ops/delivery/transition")',
+            '"PICKUP","EN_ROUTE","ARRIVE","DELIVER","FAIL","REOPEN"',
+            'payment_delivery_completion_allowed(order)',
+            'update_delivery_operation',
+            'Motivo obligatorio',
+            '"failed": "Problemas"',
+            'def ops_inbox_url(',
+            'Abrir inbox',
+            "get('sla_level')",
+        ):
+            self.assertIn(marker,SOURCE)
+
+    def test_delivery_migration_keeps_payment_audit_outbox_and_incident_contracts(self) -> None:
+        for marker in (
+            "Payment is not cleared for delivery completion",
+            "api.delivery_operation_events",
+            "api.delivery_incidents",
+            "DELIVERY_EXCEPTION",
+            "api.whatsapp_outbox",
+            "idempotency_key",
+            "api.v_delivery_operations",
+            "sla_level",
+        ):
+            self.assertIn(marker,MIGRATION)
 
 
 if __name__ == "__main__":

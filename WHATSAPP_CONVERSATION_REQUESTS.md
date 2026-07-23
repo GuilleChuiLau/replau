@@ -121,3 +121,9 @@ Outbound reply text follows the same privacy window as inbound content: 30 days 
 Active alerts appear in the private inbox and are recorded in the request audit timeline. The monitor also attempts a local desktop notification and always writes its result to the systemd journal. It never sends SLA alerts through customer WhatsApp.
 
 Apply and contract-test the migration with `add_whatsapp_sla_alerts.sql` and `test_whatsapp_sla_alerts.sql`; the test always rolls back.
+
+## Integrated delivery operations
+
+The Logistics Delivery Station uses explicit assignment states: assigned, picked up, en route, arrived, delivered, and failed. Each transition is transactional, idempotent, timestamped, and audited. Customer updates are inserted into the existing WhatsApp outbox only after an operator confirms a transition. Completion remains payment-gated in both the private UI and database.
+
+A delivery failure opens an internal incident and escalates an existing matching staff-inbox conversation to urgent without fabricating customer consent. If no prior customer conversation exists, the incident remains visible in Logistics. Operational views expose unaccepted offers, slow pickup, promised-time overruns, driver load, current location, and open incidents.
