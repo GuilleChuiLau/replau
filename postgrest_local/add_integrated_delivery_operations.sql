@@ -102,7 +102,7 @@ END $$;
 
 CREATE OR REPLACE VIEW api.v_delivery_operations AS
 SELECT a.id AS assignment_id,a.pedido_id,p.pedido_num,p.estado AS pedido_estado,p.metodo_pago,p.total,c.nombre AS cliente_nombre,c.whatsapp_number,
- p.direccion_confirmada,p.direccion_detectada,p.maps_url,a.repartidor_id,r.codigo AS repartidor_codigo,r.nombre AS repartidor_nombre,a.status,a.priority,a.promised_at,
+ v.direccion_confirmada,v.direccion_detectada,v.maps_url,a.repartidor_id,r.codigo AS repartidor_codigo,r.nombre AS repartidor_nombre,a.status,a.priority,a.promised_at,
  a.offered_at,a.assigned_at,a.picked_up_at,a.en_route_at,a.arrived_at,a.completed_at,a.failed_at,a.failure_reason,a.driver_latitude,a.driver_longitude,a.driver_location_at,a.version,
  GREATEST(0,floor(extract(epoch FROM(now()-COALESCE(a.assigned_at,a.offered_at))))/60)::integer AS operation_minutes,
  CASE WHEN a.status IN('OFFERED') AND now()-a.offered_at>=interval '10 minutes' THEN 'URGENT'
@@ -112,7 +112,7 @@ SELECT a.id AS assignment_id,a.pedido_id,p.pedido_num,p.estado AS pedido_estado,
       WHEN a.status IN('ACCEPTED','ASSIGNED') AND now()-COALESCE(a.assigned_at,a.responded_at,a.offered_at)>=interval '10 minutes' THEN 'WARNING' ELSE 'OK' END AS sla_level,
  i.id AS incident_id,i.reason AS incident_reason,i.opened_at AS incident_opened_at,
  (SELECT wr.id FROM api.whatsapp_conversation_requests wr WHERE wr.customer_address=c.whatsapp_number ORDER BY wr.last_inbound_at DESC LIMIT 1) AS conversation_request_id
-FROM api.delivery_asignaciones a JOIN api.pedidos p ON p.id=a.pedido_id JOIN api.clientes_whatsapp c ON c.id=p.cliente_id LEFT JOIN api.repartidores r ON r.id=a.repartidor_id LEFT JOIN api.delivery_incidents i ON i.assignment_id=a.id AND i.status='OPEN';
+FROM api.delivery_asignaciones a JOIN api.pedidos p ON p.id=a.pedido_id JOIN api.v_pedidos_logistica v ON v.id=p.id JOIN api.clientes_whatsapp c ON c.id=p.cliente_id LEFT JOIN api.repartidores r ON r.id=a.repartidor_id LEFT JOIN api.delivery_incidents i ON i.assignment_id=a.id AND i.status='OPEN';
 
 CREATE OR REPLACE VIEW api.v_delivery_asignaciones AS
 SELECT a.id,a.pedido_id,p.pedido_num,p.estado AS pedido_estado,a.repartidor_id,r.codigo AS repartidor_codigo,r.nombre AS repartidor_nombre,r.whatsapp_number AS repartidor_whatsapp,
