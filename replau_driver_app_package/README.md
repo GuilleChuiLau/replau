@@ -35,14 +35,14 @@ From this package folder:
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
-POSTGREST_BASE_URL=http://127.0.0.1:3000 APP_PORT=8796 ./replau_driver_app.py
+POSTGREST_BASE_URL=http://127.0.0.1:3000 APP_PORT=8797 ./replau_driver_app.py
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8796/driver
-http://127.0.0.1:8796/ops/drivers
+http://127.0.0.1:8797/driver
+http://127.0.0.1:8797/ops/drivers
 ```
 
 ## Phase 1 database migration
@@ -63,7 +63,7 @@ Then reload/check PostgREST:
 
 ```bash
 curl -sS http://127.0.0.1:3000/v_driver_accounts?limit=1
-curl -sS http://127.0.0.1:8796/health
+curl -sS http://127.0.0.1:8797/health
 ```
 
 ## Phase 1 install
@@ -109,7 +109,7 @@ It:
 Open locally:
 
 ```text
-http://127.0.0.1:8796/ops/driver-dispatch
+http://127.0.0.1:8797/ops/driver-dispatch
 http://localhost/driver
 ```
 
@@ -119,7 +119,7 @@ Phase 3 adds a browser-usable driver dashboard on top of the existing APIs:
 
 ```text
 http://localhost/driver
-http://127.0.0.1:8796/driver/app/{driver_account_id}
+http://127.0.0.1:8797/driver/app/{driver_account_id}
 ```
 
 Drivers can:
@@ -157,7 +157,7 @@ Useful overrides:
 
 ```bash
 DRIVER_PHONE=51900001996 PICKUP_CODE=TEST_SURCO ./smoke_driver_dispatch_flow.sh
-APP_BASE_URL=http://127.0.0.1:8796 POSTGREST_BASE_URL=http://127.0.0.1:3000 ./smoke_driver_dispatch_flow.sh
+APP_BASE_URL=http://127.0.0.1:8797 POSTGREST_BASE_URL=http://127.0.0.1:3000 ./smoke_driver_dispatch_flow.sh
 ```
 
 ## Public edge sketch
@@ -181,7 +181,7 @@ Manual nginx equivalent:
 
 ```nginx
 upstream replau_driver_app_public {
-    server 127.0.0.1:8796 max_fails=3 fail_timeout=10s;
+    server 127.0.0.1:8797 max_fails=3 fail_timeout=10s;
     keepalive 16;
 }
 

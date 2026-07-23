@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_BASE_URL="${APP_BASE_URL:-http://127.0.0.1:8796}"
+APP_BASE_URL="${APP_BASE_URL:-http://127.0.0.1:8797}"
 POSTGREST_BASE_URL="${POSTGREST_BASE_URL:-http://127.0.0.1:3000}"
 DELIVERY_UI_URL="${DELIVERY_UI_URL:-http://127.0.0.1:8790/ops/delivery}"
+DRIVER_AUTH_USERNAME="${DRIVER_AUTH_USERNAME:-driver}"
+DRIVER_AUTH_PASSWORD="${DRIVER_AUTH_PASSWORD:-}"
+APP_AUTH=()
+if [[ -n "${DRIVER_AUTH_PASSWORD}" ]]; then
+  APP_AUTH=(-u "${DRIVER_AUTH_USERNAME}:${DRIVER_AUTH_PASSWORD}")
+fi
 
 DRIVER_PHONE="${DRIVER_PHONE:-51900001996}"
 PICKUP_CODE="${PICKUP_CODE:-TEST_SURCO}"
@@ -67,7 +73,7 @@ pg_delete() {
 app_post_form() {
   local path="$1"
   shift
-  curl -fsS -X POST "${APP_BASE_URL}${path}" "$@"
+  curl -fsS "${APP_AUTH[@]}" -X POST "${APP_BASE_URL}${path}" "$@"
 }
 
 first_row() {
@@ -104,7 +110,7 @@ cleanup() {
     fi
   fi
   if [[ -n "${session_id}" && -n "${driver_account_id}" ]]; then
-    curl -fsS -X POST "${APP_BASE_URL}/api/driver/${driver_account_id}/offline" >/dev/null
+    curl -fsS "${APP_AUTH[@]}" -X POST "${APP_BASE_URL}/api/driver/${driver_account_id}/offline" >/dev/null
   fi
   if [[ -n "${driver_account_id}" && -n "${original_driver_status}" ]]; then
     pg_patch "/driver_accounts?id=eq.${driver_account_id}" "{\"status\":\"${original_driver_status}\"}" >/dev/null
@@ -209,13 +215,13 @@ jq -e '.ok == true and .candidate_count >= 1' <<<"${offer_result}" >/dev/null
 batch_id="$(jq -r '.batch_id' <<<"${offer_result}")"
 
 echo "[8/9] Accepting offer through driver app dashboard"
-offers="$(curl -fsS "${APP_BASE_URL}/api/driver/${driver_account_id}/offers")"
+offers="$(curl -fsS "${APP_AUTH[@]}" "${APP_BASE_URL}/api/driver/${driver_account_id}/offers")"
 candidate_id="$(jq -r --argjson pedido_id "${pedido_id}" '.offers[] | select(.pedido_id == $pedido_id) | .id' <<<"${offers}" | head -n1)"
 if [[ -z "${candidate_id}" ]]; then
   echo "Driver offers API did not return the created candidate" >&2
   exit 1
 fi
-curl -fsS -X POST "${APP_BASE_URL}/driver/app/${driver_account_id}/offers/${candidate_id}/accept" -o /dev/null
+curl -fsS "${APP_AUTH[@]}" -X POST "${APP_BASE_URL}/driver/app/${driver_account_id}/offers/${candidate_id}/accept" -o /dev/null
 assignment_id="$(
   pg_get "/delivery_offer_candidates?id=eq.${candidate_id}&select=accepted_assignment_id&limit=1" |
     jq -r '.[0].accepted_assignment_id // empty'

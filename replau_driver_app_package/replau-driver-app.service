@@ -1,20 +1,17 @@
 [Unit]
 Description=Replau Driver App
 After=network.target postgrest-localapi.service
+Requires=postgrest-localapi.service
 
 [Service]
 Type=simple
-User=guill
-Group=guill
-WorkingDirectory=/opt/replau_driver_app
-EnvironmentFile=/etc/replau-driver-app.env
-ExecStart=/opt/replau_driver_app/.venv/bin/python /opt/replau_driver_app/replau_driver_app.py
-Restart=always
-RestartSec=10
+WorkingDirectory=/home/guill/.openclaw/workspace/replau/replau_driver_app_package
+EnvironmentFile=/home/guill/.config/replau/driver.env
+ExecStart=/home/guill/.local/share/replau/services/product-venv/bin/python replau_driver_app.py
+Restart=on-failure
+RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ReadWritePaths=/home/guill/.openclaw/workspace/replau_driver_documents
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

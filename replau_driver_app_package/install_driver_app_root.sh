@@ -45,6 +45,6 @@ systemctl enable --now replau-driver-app
 
 echo "[7/7] Health check"
 sleep 1
-curl -fsS http://127.0.0.1:8796/health
+curl -fsS http://127.0.0.1:8797/health
 echo
 systemctl status replau-driver-app --no-pager

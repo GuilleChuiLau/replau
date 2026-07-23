@@ -9,10 +9,10 @@ Public driver app:
 http://localhost/driver
 
 Local driver app:
-http://127.0.0.1:8796/driver
+http://127.0.0.1:8797/driver
 
 Local dispatch admin:
-http://127.0.0.1:8796/ops/driver-dispatch
+http://127.0.0.1:8797/ops/driver-dispatch
 
 Delivery station:
 http://127.0.0.1:8790/ops/delivery
@@ -48,7 +48,7 @@ This opens:
 For the current test driver:
 
 ```text
-http://127.0.0.1:8796/driver/app/1
+http://127.0.0.1:8797/driver/app/1
 ```
 
 ### 2. Check Driver Readiness
@@ -141,13 +141,13 @@ This closes active online sessions and returns the account from `ACTIVE` to `APP
 Go to:
 
 ```text
-http://127.0.0.1:8796/ops/driver-dispatch
+http://127.0.0.1:8797/ops/driver-dispatch
 ```
 
 If token auth is enabled, include the admin token as a query parameter:
 
 ```text
-http://127.0.0.1:8796/ops/driver-dispatch?token=ADMIN_TOKEN_HERE
+http://127.0.0.1:8797/ops/driver-dispatch?token=ADMIN_TOKEN_HERE
 ```
 
 ### 2. Read The KPIs
@@ -263,13 +263,13 @@ cleanup: restored smoke test state
 Driver app health:
 
 ```bash
-curl -fsS http://127.0.0.1:8796/health
+curl -fsS http://127.0.0.1:8797/health
 ```
 
 Driver API health:
 
 ```bash
-curl -fsS http://127.0.0.1:8796/api/driver/health
+curl -fsS -u driver:DRIVER_PASSWORD http://127.0.0.1:8797/api/driver/health
 ```
 
 Service status:
@@ -308,7 +308,7 @@ sudo grep '^ADMIN_TOKEN=' /etc/replau-driver-app.env
 Then open:
 
 ```text
-http://127.0.0.1:8796/ops/driver-dispatch?token=ADMIN_TOKEN_HERE
+http://127.0.0.1:8797/ops/driver-dispatch?token=ADMIN_TOKEN_HERE
 ```
 
 ### Driver Cannot Go Online

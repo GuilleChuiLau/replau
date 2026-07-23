@@ -30,14 +30,12 @@ runuser -u postgres -- psql -d "${DB_NAME}" -v ON_ERROR_STOP=1 -c "NOTIFY pgrst,
 sleep 1
 
 echo "[5/5] Verifying local health"
-curl -fsS http://127.0.0.1:8796/health
-echo
-curl -fsS http://127.0.0.1:8796/api/driver/health
+curl -fsS http://127.0.0.1:8797/health
 echo
 
 echo
 echo "Driver dispatch admin route:"
-echo "http://127.0.0.1:8796/ops/driver-dispatch"
+echo "http://127.0.0.1:8797/ops/driver-dispatch"
 echo
 echo "Public driver route:"
 echo "http://localhost/driver"

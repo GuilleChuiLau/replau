@@ -80,7 +80,7 @@ path = Path(sys.argv[1])
 text = path.read_text()
 
 upstream = """upstream replau_driver_app_public {
-    server 127.0.0.1:8796 max_fails=3 fail_timeout=10s;
+    server 127.0.0.1:8797 max_fails=3 fail_timeout=10s;
     keepalive 16;
 }
 
@@ -131,7 +131,7 @@ systemctl restart "${APP_SERVICE}"
 systemctl reload nginx
 
 echo "[5/5] Verifying local health"
-curl -fsS http://127.0.0.1:8796/health
+curl -fsS http://127.0.0.1:8797/health
 echo
 
 echo
@@ -139,7 +139,7 @@ echo "Driver public route:"
 echo "http://localhost/driver"
 echo
 echo "Local admin ops route:"
-echo "http://127.0.0.1:8796/ops/drivers?token=${ADMIN_TOKEN_VALUE}"
+echo "http://127.0.0.1:8797/ops/drivers?token=${ADMIN_TOKEN_VALUE}"
 echo
 echo "Admin token:"
 echo "${ADMIN_TOKEN_VALUE}"

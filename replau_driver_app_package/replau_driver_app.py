@@ -6,6 +6,9 @@ import html
 import json
 import os
 import re
+import secrets
+from binascii import Error as Base64Error
+from base64 import b64decode
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -17,11 +20,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 POSTGREST_BASE_URL = os.environ.get("POSTGREST_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
 APP_HOST = os.environ.get("APP_HOST", "127.0.0.1")
-APP_PORT = int(os.environ.get("APP_PORT", "8796"))
+APP_PORT = int(os.environ.get("APP_PORT", "8797"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "10"))
 
 REQUIRE_ADMIN_TOKEN = os.environ.get("REQUIRE_ADMIN_TOKEN", "false").lower() == "true"
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()
+REQUIRE_DRIVER_AUTH = os.environ.get("REQUIRE_DRIVER_AUTH", "true").lower() == "true"
+DRIVER_AUTH_USERNAME = os.environ.get("DRIVER_AUTH_USERNAME", "driver").strip()
+DRIVER_AUTH_PASSWORD = os.environ.get("DRIVER_AUTH_PASSWORD", "").strip()
 DRIVER_DOCUMENT_DIR = Path(
     os.environ.get("REPLAU_DRIVER_DOCUMENT_DIR", "/home/guill/.openclaw/workspace/replau_driver_documents")
 ).resolve()
@@ -29,6 +35,34 @@ MAX_UPLOAD_BYTES = int(os.environ.get("REPLAU_DRIVER_MAX_UPLOAD_BYTES", str(8 * 
 
 app = FastAPI(title="Replau Driver App", version="0.1.0")
 DRIVER_DOCUMENT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@app.middleware("http")
+async def require_driver_basic_auth(request: Request, call_next):
+    path = request.url.path
+    protected = path == "/driver" or path.startswith("/driver/") or path.startswith("/api/driver/")
+    if not protected or not REQUIRE_DRIVER_AUTH:
+        return await call_next(request)
+    if not DRIVER_AUTH_USERNAME or not DRIVER_AUTH_PASSWORD:
+        return JSONResponse({"detail": "Driver authentication is not configured"}, status_code=503)
+    authorization = request.headers.get("authorization", "")
+    valid = False
+    if authorization.startswith("Basic "):
+        try:
+            decoded = b64decode(authorization[6:], validate=True).decode("utf-8")
+            username, password = decoded.split(":", 1)
+            valid = secrets.compare_digest(username, DRIVER_AUTH_USERNAME) and secrets.compare_digest(
+                password, DRIVER_AUTH_PASSWORD
+            )
+        except (Base64Error, ValueError, UnicodeDecodeError):
+            valid = False
+    if not valid:
+        return JSONResponse(
+            {"detail": "Driver authentication required"},
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Replau Driver", charset="UTF-8"'},
+        )
+    return await call_next(request)
 
 
 def esc(value: Any) -> str:
@@ -369,7 +403,7 @@ def driver_app_dashboard(account_id: int, flash: str = "") -> HTMLResponse:
     if repartidor_id:
         assignments = pg_get(
             f"/v_delivery_asignaciones?repartidor_id=eq.{repartidor_id}"
-            "&status=in.(ACCEPTED,ASSIGNED)"
+            "&status=in.(ACCEPTED,ASSIGNED,PICKED_UP,EN_ROUTE,ARRIVED)"
             "&order=assigned_at.desc"
             "&limit=5"
         )
@@ -395,6 +429,36 @@ def driver_app_dashboard(account_id: int, flash: str = "") -> HTMLResponse:
         """
         for o in offers
     ) or '<tr><td colspan="5" class="muted">No open offers.</td></tr>'
+    def assignment_actions(assignment: Dict[str, Any]) -> str:
+        assignment_id = int(assignment["id"])
+        status = str(assignment.get("status") or "")
+        actions = []
+        for action, label, css in (
+            ("PICKUP", "Picked up", "good"),
+            ("EN_ROUTE", "En route", "good"),
+            ("ARRIVE", "Arrived", "good"),
+            ("DELIVER", "Delivered", "good"),
+        ):
+            allowed = (
+                (action == "PICKUP" and status in {"ACCEPTED", "ASSIGNED"})
+                or (action == "EN_ROUTE" and status in {"ACCEPTED", "ASSIGNED", "PICKED_UP"})
+                or (action == "ARRIVE" and status == "EN_ROUTE")
+                or (action == "DELIVER" and status in {"PICKED_UP", "EN_ROUTE", "ARRIVED"})
+            )
+            if allowed:
+                actions.append(
+                    f'<form method="post" action="/driver/app/{account_id}/assignments/{assignment_id}/action">'
+                    f'<input type="hidden" name="action" value="{action}">'
+                    f'<button class="{css}" type="submit">{label}</button></form>'
+                )
+        actions.append(
+            f'<form method="post" action="/driver/app/{account_id}/assignments/{assignment_id}/action">'
+            '<input type="hidden" name="action" value="FAIL">'
+            '<input name="reason" maxlength="500" placeholder="Problem details" required>'
+            '<button class="bad" type="submit">Report problem</button></form>'
+        )
+        return '<div class="actions">' + "".join(actions) + "</div>"
+
     assignment_rows = "".join(
         f"""
         <tr>
@@ -402,10 +466,11 @@ def driver_app_dashboard(account_id: int, flash: str = "") -> HTMLResponse:
           <td>{badge(a.get('status'))}<br><span class="muted">{esc(a.get('assigned_at'))}</span></td>
           <td>S/ {esc(a.get('fee'))}</td>
           <td class="code">{esc(a.get('driver_latitude'))}, {esc(a.get('driver_longitude'))}<br><span class="muted">{esc(a.get('driver_location_at') or '')}</span></td>
+          <td>{assignment_actions(a)}</td>
         </tr>
         """
         for a in assignments
-    ) or '<tr><td colspan="4" class="muted">No active assignment.</td></tr>'
+    ) or '<tr><td colspan="5" class="muted">No active assignment.</td></tr>'
     online_controls = f"""
       <form method="post" action="/driver/app/{account_id}/offline">
         <button class="bad" type="submit">Go offline</button>
@@ -453,7 +518,7 @@ def driver_app_dashboard(account_id: int, flash: str = "") -> HTMLResponse:
     </section>
     <section class="panel">
       <h2>Current assignment</h2>
-      <table><thead><tr><th>Order</th><th>Status</th><th>Fee</th><th>Location</th></tr></thead><tbody>{assignment_rows}</tbody></table>
+      <table><thead><tr><th>Order</th><th>Status</th><th>Fee</th><th>Location</th><th>Action</th></tr></thead><tbody>{assignment_rows}</tbody></table>
     </section>
     """
     return layout("Driver App", body, flash=flash)
@@ -508,6 +573,55 @@ def driver_app_offer_decline(account_id: int, candidate_id: int) -> RedirectResp
         "p_candidate_id": candidate_id,
     })
     flash = "Offer declined" if result.get("ok") else str(result.get("error") or "Offer not declined")
+    return RedirectResponse(url=driver_app_url(account_id, flash), status_code=303)
+
+
+@app.post("/driver/app/{account_id}/assignments/{assignment_id}/action")
+def driver_app_assignment_action(
+    account_id: int,
+    assignment_id: int,
+    action: str = Form(...),
+    reason: str = Form(""),
+) -> RedirectResponse:
+    accounts = pg_get(f"/v_driver_accounts?id=eq.{account_id}&select=id,repartidor_id,repartidor_codigo&limit=1")
+    if not accounts or accounts[0].get("repartidor_id") is None:
+        raise HTTPException(status_code=403, detail="Driver account is not linked")
+    account = accounts[0]
+    assignments = pg_get(
+        f"/v_delivery_asignaciones?id=eq.{assignment_id}"
+        f"&repartidor_id=eq.{account['repartidor_id']}&select=id,status&limit=1"
+    )
+    if not assignments:
+        raise HTTPException(status_code=403, detail="Assignment does not belong to this driver")
+    normalized_action = action.strip().upper()
+    if normalized_action not in {"PICKUP", "EN_ROUTE", "ARRIVE", "DELIVER", "FAIL"}:
+        raise HTTPException(status_code=400, detail="Unsupported driver action")
+    if normalized_action == "FAIL" and not reason.strip():
+        raise HTTPException(status_code=400, detail="Problem details are required")
+    actor = "driver-web-" + re.sub(r"[^A-Za-z0-9._@-]", "-", str(account.get("repartidor_codigo") or account_id))
+    idempotency_key = f"driver-web-{assignment_id}-{normalized_action.lower()}-{secrets.token_hex(12)}"
+    try:
+        result = pg_rpc(
+            "update_delivery_operation",
+            {
+                "p_assignment_id": assignment_id,
+                "p_action": normalized_action,
+                "p_actor": actor[:80],
+                "p_reason": reason.strip() or None,
+                "p_priority": None,
+                "p_promised_at": None,
+                "p_idempotency_key": idempotency_key,
+            },
+        )
+        flash = normalized_action.replace("_", " ").title() if result.get("ok") else "Action not completed"
+    except requests.HTTPError as exc:
+        detail = "Action not completed"
+        if exc.response is not None:
+            try:
+                detail = exc.response.json().get("message") or exc.response.json().get("details") or detail
+            except (ValueError, AttributeError):
+                pass
+        flash = detail
     return RedirectResponse(url=driver_app_url(account_id, flash), status_code=303)
 
 
