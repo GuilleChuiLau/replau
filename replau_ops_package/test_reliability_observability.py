@@ -78,6 +78,10 @@ class ConversationRequestQueueTests(unittest.TestCase):
             'INBOX_ACTIONS',
             'Internal note',
             'Audit timeline',
+            'enqueue_whatsapp_staff_reply',
+            'Reply on WhatsApp',
+            'Outbound delivery history',
+            'idempotency_key',
         ):
             self.assertIn(marker, DASHBOARD_SOURCE)
 
@@ -111,10 +115,10 @@ class ConversationRequestQueueTests(unittest.TestCase):
             "note_count":1,"latest_note":"Call customer","latest_note_author":"Memo",
         }
         request=Request({"type":"http","method":"GET","path":"/conversation-requests","query_string":b"","headers":[]})
-        with patch.object(dashboard,"conversation_requests",return_value={"ok":True,"data":[row]}):
+        with patch.object(dashboard,"conversation_requests",return_value={"ok":True,"data":[row]}), patch.object(dashboard,"canned_replies",return_value={"ok":True,"data":[{"code":"menu","label":"Menú","message_text":"Nuestro menú"}]}):
             response=dashboard.conversation_requests_page(request)
         body=response.body.decode()
-        for marker in ("WhatsApp Staff Inbox","PED-1","Call customer","Waiting 15m+","MARK_READ"):
+        for marker in ("WhatsApp Staff Inbox","PED-1","Call customer","Waiting 15m+","MARK_READ","Reply on WhatsApp","Nuestro menú","Outbound delivery history"):
             self.assertIn(marker,body)
 
 

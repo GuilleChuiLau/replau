@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import html, json, os, socket, subprocess
+import html, json, os, secrets, socket, subprocess
 from collections import Counter, defaultdict
 from pathlib import Path
 from datetime import datetime, time, timezone
@@ -167,6 +167,10 @@ def conversation_requests(status="",priority="",assigned="",unread="",query=""):
             "sender_name","customer_address","first_message_text","last_message_text","assigned_to","latest_note","pedido_num","order_status"
         )).lower()]
     return {"ok":True,"data":rows}
+def canned_replies():
+    return pg("/whatsapp_canned_replies?active=eq.true&select=code,label,message_text&order=sort_order.asc,label.asc")
+def conversation_replies(request_id:int):
+    return pg(f"/v_whatsapp_request_replies?conversation_request_id=eq.{request_id}&select=*&order=id.desc&limit=100")
 def conversation_inbox_metrics(rows):
     local_today=datetime.now(ZoneInfo(BUSINESS_TZ)).date()
     def local_date(value):
@@ -617,6 +621,25 @@ def api_conversation_request_events(request_id:int,req:Request,x_ops_token:Optio
     result=pg(f"/whatsapp_request_events?request_id=eq.{request_id}&select=id,event_type,actor,from_status,to_status,details,created_at&order=created_at.desc&limit=100")
     if not result["ok"]: raise HTTPException(502,result.get("error") or "Events unavailable")
     return result
+@app.get("/api/conversation-requests/{request_id}/replies")
+def api_conversation_request_replies(request_id:int,req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
+    auth(req,x_ops_token)
+    result=conversation_replies(request_id)
+    if not result["ok"]: raise HTTPException(502,result.get("error") or "Replies unavailable")
+    return result
+@app.post("/api/conversation-requests/{request_id}/reply")
+async def enqueue_conversation_reply(request_id:int,req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
+    auth(req,x_ops_token)
+    form={k:v[-1] if v else "" for k,v in parse_qs((await req.body()).decode("utf-8"),keep_blank_values=True).items()}
+    actor=form.get("actor","ops-dashboard").strip() or "ops-dashboard"
+    message=form.get("message_text","").strip()
+    key=form.get("idempotency_key","").strip()
+    if not (1<=len(actor)<=80 and 1<=len(message)<=2000 and 16<=len(key)<=120): raise HTTPException(400,"Invalid reply fields")
+    result=pg_post("/rpc/enqueue_whatsapp_staff_reply",{"p_request_id":request_id,"p_actor":actor,"p_message_text":message,"p_idempotency_key":key})
+    if not result["ok"]: raise HTTPException(502,result.get("error") or "Could not queue reply")
+    duplicate=isinstance(result.get("data"),dict) and bool(result["data"].get("duplicate"))
+    flash="Reply+already+queued" if duplicate else "Reply+queued+for+delivery"
+    return RedirectResponse(url=with_token(f"/conversation-requests?flash={flash}",req),status_code=303)
 @app.post("/api/conversation-requests/{request_id}/action")
 async def update_conversation_request_action(request_id:int,req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
     auth(req,x_ops_token)
@@ -708,6 +731,12 @@ def inbox_action_form(row,req):
 <label>Internal note<textarea name="note" maxlength="2000" placeholder="Visible to staff only"></textarea></label>
 <label>Action<select name="action"><option value="TAKE">Take request</option><option value="ASSIGN">Assign</option><option value="PRIORITY">Change priority</option><option value="NOTE">Add note</option><option value="CLOSE">Resolve</option><option value="REOPEN">Reopen</option><option value="BLOCK">Block</option><option value="{read_action}">{read_label}</option></select></label>
 <button type="submit">Apply</button></form></details>'''
+def inbox_reply_form(row,req,templates):
+    rid=int(row.get("id") or 0)
+    disabled=" disabled" if row.get("status")=="BLOCKED" else ""
+    options='<option value="">Write a custom reply</option>'+"".join(f'<option value="{esc(x.get("message_text"))}">{esc(x.get("label"))}</option>' for x in templates)
+    key="staff-reply-"+secrets.token_urlsafe(18)
+    return f'''<div class="reply-box"><h3>Reply on WhatsApp</h3><form class="reply-form" method="post" action="/api/conversation-requests/{rid}/reply{token_query(req)}"><input type="hidden" name="idempotency_key" value="{esc(key)}"><label>Operator<input name="actor" value="{esc(row.get('assigned_to') or 'ops-dashboard')}" maxlength="80" required></label><label>Canned reply<select onchange="if(this.value) this.form.message_text.value=this.value">{options}</select></label><label class="full">Message preview<textarea name="message_text" maxlength="2000" required placeholder="Write the exact message the customer will receive"></textarea></label><button type="submit"{disabled}>Previewed — queue reply</button></form><p class="muted">Duplicate-safe delivery through the WhatsApp outbox. Blocked conversations cannot be replied to.</p></div>'''
 @app.get("/conversation-requests",response_class=HTMLResponse)
 def conversation_requests_page(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
     auth(req,x_ops_token)
@@ -721,6 +750,8 @@ def conversation_requests_page(req:Request,x_ops_token:Optional[str]=Header(defa
     if unread and unread not in {"true","false"}: raise HTTPException(400,"Invalid unread filter")
     result=conversation_requests(status,priority,assigned,unread,query)
     all_result=conversation_requests()
+    template_result=canned_replies()
+    templates=template_result.get("data",[]) if template_result.get("ok") else []
     metrics=conversation_inbox_metrics(all_result["data"] if all_result["ok"] else result.get("data",[]))
     flash=req.query_params.get("flash","")
     flash_html=f'<div class="flash">{esc(flash)}</div>' if flash else ""
@@ -735,7 +766,7 @@ def conversation_requests_page(req:Request,x_ops_token:Optional[str]=Header(defa
             order_html=(f'''<div class="order"><strong>{esc(row.get("pedido_num"))}</strong> · {esc(row.get("order_status"))} · {money(row.get("order_total"))}<br><span class="muted">Created {esc(row.get("order_created_at"))}</span></div>''' if row.get("pedido_num") else '<div class="muted">No linked order yet</div>')
             note_html=(f'''<blockquote>{esc(row.get("latest_note"))}<footer>{esc(row.get("latest_note_author"))} · {esc(row.get("latest_note_at"))} · {esc(row.get("note_count"))} note(s)</footer></blockquote>''' if row.get("latest_note") else '<div class="muted">No internal notes</div>')
             response="—" if row.get("response_seconds") is None else f'{round(int(row.get("response_seconds"))/60,1)} min'
-            rows.append(f'''<article class="request{unread_class}{urgency}"><div class="request-head"><div><span class="priority {esc(str(row.get("priority") or "NORMAL").lower())}">{esc(row.get("priority") or "NORMAL")}</span> <span class="status">{esc(str(row.get("status") or "").replace("_"," "))}</span>{' <span class="new">UNREAD</span>' if row.get("is_unread") else ''}<h2>{esc(row.get("sender_name") or "Unknown customer")}</h2><div class="muted">{esc(row.get("customer_address"))} · {esc(row.get("inbound_count"))} inbound message(s)</div></div><div class="wait"><strong>{wait} min</strong><span>waiting</span></div></div><div class="request-grid"><section><h3>Latest message</h3><p>{esc(row.get("last_message_text") or "Content redacted by retention")}</p><div class="muted">First contact: {esc(row.get("first_inbound_at"))}<br>Last inbound: {esc(row.get("last_inbound_at"))}<br>First response: {esc(response)}</div></section><section><h3>Ownership</h3><p><strong>{esc(row.get("assigned_to") or "Unassigned")}</strong></p><div class="muted">Assigned: {esc(row.get("assigned_at") or "—")}<br>SLA due: {esc(row.get("sla_due_at") or "—")}</div><h3>Latest order</h3>{order_html}</section><section><h3>Internal notes</h3>{note_html}<p><a class="link" href="/api/conversation-requests/{int(row.get('id'))}/notes{token_query(req)}" target="_blank">All notes</a> · <a class="link" href="/api/conversation-requests/{int(row.get('id'))}/events{token_query(req)}" target="_blank">Audit timeline</a></p>{inbox_action_form(row,req)}</section></div></article>''')
+            rows.append(f'''<article class="request{unread_class}{urgency}"><div class="request-head"><div><span class="priority {esc(str(row.get("priority") or "NORMAL").lower())}">{esc(row.get("priority") or "NORMAL")}</span> <span class="status">{esc(str(row.get("status") or "").replace("_"," "))}</span>{' <span class="new">UNREAD</span>' if row.get("is_unread") else ''}<h2>{esc(row.get("sender_name") or "Unknown customer")}</h2><div class="muted">{esc(row.get("customer_address"))} · {esc(row.get("inbound_count"))} inbound message(s)</div></div><div class="wait"><strong>{wait} min</strong><span>waiting</span></div></div><div class="request-grid"><section><h3>Latest message</h3><p>{esc(row.get("last_message_text") or "Content redacted by retention")}</p><div class="muted">First contact: {esc(row.get("first_inbound_at"))}<br>Last inbound: {esc(row.get("last_inbound_at"))}<br>First response: {esc(response)}</div><p><a class="link" href="/api/conversation-requests/{int(row.get('id'))}/replies{token_query(req)}" target="_blank">Outbound delivery history</a></p></section><section><h3>Ownership</h3><p><strong>{esc(row.get("assigned_to") or "Unassigned")}</strong></p><div class="muted">Assigned: {esc(row.get("assigned_at") or "—")}<br>SLA due: {esc(row.get("sla_due_at") or "—")}</div><h3>Latest order</h3>{order_html}</section><section>{inbox_reply_form(row,req,templates)}<h3>Internal notes</h3>{note_html}<p><a class="link" href="/api/conversation-requests/{int(row.get('id'))}/notes{token_query(req)}" target="_blank">All notes</a> · <a class="link" href="/api/conversation-requests/{int(row.get('id'))}/events{token_query(req)}" target="_blank">Audit timeline</a></p>{inbox_action_form(row,req)}</section></div></article>''')
         rows_html="".join(rows) if rows else '<div class="empty">No requests match these filters.</div>'
     status_options='<option value="">All statuses</option>'+"".join(f'<option value="{value}" {"selected" if status==value else ""}>{value.replace("_"," ").title()}</option>' for value in ("AUTO_STARTED","IN_PROGRESS","CLOSED","BLOCKED"))
     priority_options='<option value="">All priorities</option>'+"".join(f'<option value="{value}" {"selected" if priority==value else ""}>{value.title()}</option>' for value in ("NORMAL","HIGH","URGENT"))

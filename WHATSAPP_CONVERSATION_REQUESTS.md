@@ -97,3 +97,16 @@ does not patch lifecycle fields directly. New customer messages mark a request
 unread, and a message after closure reopens it with a fresh SLA. Internal notes
 are private and are deleted by the existing privacy-retention job when the
 corresponding request content reaches its redaction window.
+# Staff replies
+
+Staff can reply from the private Ops inbox. A reply is inserted transactionally into the existing WhatsApp outbox and delivered by the existing worker and OpenClaw adapter. Each submission carries a unique idempotency key, is limited to ten replies per conversation in five minutes, and creates an audit event. Blocked conversations cannot receive replies.
+
+Apply and contract-test the additive migration:
+
+```bash
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d localapi \
+  -f postgrest_local/add_whatsapp_staff_replies.sql \
+  -f postgrest_local/test_whatsapp_staff_replies.sql
+```
+
+The contract test always rolls back and never sends a WhatsApp message. Delivery status is available from each request's **Outbound delivery history** link.
