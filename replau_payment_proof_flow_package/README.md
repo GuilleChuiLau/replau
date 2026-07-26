@@ -19,6 +19,17 @@ amount, recipient, operation number, timestamp, and success wording. Cashier
 alerts include stable reason codes and severity so an operator can distinguish
 an amount mismatch from a low-confidence extraction or an unknown provider.
 
+Each image also receives a local perceptual difference hash. A proof whose hash
+is within `PAYMENT_PERCEPTUAL_HASH_DISTANCE` bits of another proof is flagged
+for manual review even if compression or a minor image change produced a
+different SHA-256 digest. The conservative default distance is `2`.
+
+Receipt timestamps are parsed in `PAYMENT_TIMEZONE` (default `America/Lima`).
+Proofs older than `PAYMENT_RECEIPT_MAX_AGE_HOURS` (default `72`) or more than
+`PAYMENT_RECEIPT_FUTURE_TOLERANCE_MINUTES` (default `10`) in the future receive
+high-severity review reasons. These checks remain advisory and never approve or
+reject a payment automatically.
+
 OCR is advisory only. It must not automatically approve a payment because a
 screenshot can be edited or reused and does not prove settlement. Keep manual
 review enabled unless the transaction is reconciled with an authoritative bank

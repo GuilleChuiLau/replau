@@ -356,6 +356,9 @@ def render_ocr_result(result: Dict[str, Any], order_total: Any) -> str:
       {check_row('Monto', checks.get('amount_match'), 'COINCIDE', 'NO COINCIDE', 'NO SE PUDO VALIDAR')}
       {check_row('Destinatario', checks.get('recipient_match'), 'COINCIDE', 'NO COINCIDE', 'NOMBRES NO CONFIGURADOS')}
       {check_row('Operación única', None if checks.get('duplicate_operation') is None else not checks.get('duplicate_operation'), 'NO DUPLICADA', 'DUPLICADA — REVISAR', 'NO SE PUDO VALIDAR')}
+      {check_row('Imagen no reutilizada', None if checks.get('similar_image') is None else not checks.get('similar_image'), 'SIN SIMILITUD CERCANA', 'IMAGEN SIMILAR — REVISAR', 'NO SE PUDO VALIDAR')}
+      {check_row('Fecha interpretable', checks.get('receipt_timestamp_parsed'), 'INTERPRETADA', 'NO INTERPRETABLE', 'NO DETECTADA')}
+      <div class="check"><strong>Antigüedad del comprobante</strong><strong>{esc(str(checks.get('receipt_age_hours')) + ' horas' if checks.get('receipt_age_hours') is not None else 'NO DISPONIBLE')}</strong></div>
       <h3>Alertas</h3>
       {''.join(f'<div class="warning"><strong>{esc(r.get("severity"))} · {esc(r.get("code"))}</strong><br>{esc(r.get("message"))}</div>' for r in review_reasons) or '<p class="ok"><strong>Sin alertas de consistencia.</strong></p>'}
       <p class="muted"><strong>Decisión humana obligatoria:</strong> compare el comprobante, el pedido y estas validaciones antes de aprobar o rechazar.</p>

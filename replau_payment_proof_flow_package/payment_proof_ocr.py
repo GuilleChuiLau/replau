@@ -11,12 +11,14 @@ import json
 import os
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
-CACHE_VERSION = 5
+CACHE_VERSION = 8
+PAYMENT_TIMEZONE = ZoneInfo(os.environ.get("PAYMENT_TIMEZONE", "America/Lima"))
 
 PROVIDER_MARKERS = {
     "YAPE": ("yape", "yapeaste"),
@@ -36,6 +38,14 @@ OPERATION_LABELS = (
     "numero de operacion", "nro de operacion", "nro. de operacion",
     "codigo de operacion", "operacion", "constancia", "referencia",
 )
+
+SPANISH_MONTHS = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+    "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
+    "noviembre": 11, "diciembre": 12,
+    "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+    "jul": 7, "ago": 8, "sep": 9, "set": 9, "oct": 10, "nov": 11, "dic": 12,
+}
 
 
 def _plain(value: str) -> str:
@@ -62,6 +72,68 @@ def _localized_money(value: str) -> float | None:
     elif "," in cleaned:
         cleaned = cleaned.replace(",", ".")
     return _money(cleaned)
+
+
+def _parse_receipt_timestamp(value: str | None) -> datetime | None:
+    text = _plain(value or "").replace("a. m.", "am").replace("p. m.", "pm")
+    text = text.replace("a.m.", "am").replace("p.m.", "pm")
+    numeric = re.search(
+        r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\D+(\d{1,2}):(\d{2})(?:\s*(am|pm))?",
+        text,
+    )
+    if numeric:
+        day, month, year, hour, minute = (int(numeric.group(i)) for i in range(1, 6))
+        year += 2000 if year < 100 else 0
+        marker = numeric.group(6)
+        if marker == "pm" and hour < 12:
+            hour += 12
+        elif marker == "am" and hour == 12:
+            hour = 0
+        try:
+            return datetime(year, month, day, hour, minute, tzinfo=PAYMENT_TIMEZONE)
+        except ValueError:
+            return None
+    named = re.search(
+        r"\b(\d{1,2})\s+(?:de\s+)?([a-z]+)\.?\s+(?:de\s+)?(20\d{2})[^:]*?(\d{1,2}):(\d{2})(?:\s*(am|pm))?",
+        text,
+    )
+    if named and named.group(2) in SPANISH_MONTHS:
+        day, year, hour, minute = int(named.group(1)), int(named.group(3)), int(named.group(4)), int(named.group(5))
+        marker = named.group(6)
+        if marker == "pm" and hour < 12:
+            hour += 12
+        elif marker == "am" and hour == 12:
+            hour = 0
+        try:
+            return datetime(year, SPANISH_MONTHS[named.group(2)], day, hour, minute, tzinfo=PAYMENT_TIMEZONE)
+        except ValueError:
+            return None
+    return None
+
+
+def _hamming_distance(left: str, right: str) -> int | None:
+    try:
+        if len(left) != len(right):
+            return None
+        return (int(left, 16) ^ int(right, 16)).bit_count()
+    except (TypeError, ValueError):
+        return None
+
+
+def _perceptual_hash(path: Path) -> str | None:
+    try:
+        import cv2
+        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            return None
+        resized = cv2.resize(image, (9, 8), interpolation=cv2.INTER_AREA)
+        bits = resized[:, 1:] > resized[:, :-1]
+        value = 0
+        for bit in bits.flatten():
+            value = (value << 1) | int(bool(bit))
+        return f"{value:016x}"
+    except (ImportError, OSError, ValueError):
+        return None
 
 
 def _next_value(lines: list[str], labels: tuple[str, ...]) -> str | None:
@@ -284,6 +356,7 @@ class PaymentProofOCR:
         fields, field_confidence, evidence = extract_fields_detailed(lines, confidences)
         base = {
             "sha256": digest,
+            "perceptual_hash": _perceptual_hash(path),
             "cache_version": CACHE_VERSION,
             "engine": "rapidocr-onnxruntime",
             "ocr_confidence": round(confidence, 4),
@@ -339,7 +412,10 @@ class PaymentProofOCR:
                 )
 
         duplicates = []
+        similar_images: list[dict[str, Any]] = []
         operation = fields.get("operation_number")
+        perceptual_hash = str(result.get("perceptual_hash") or "")
+        similarity_limit = max(0, min(16, int(os.environ.get("PAYMENT_PERCEPTUAL_HASH_DISTANCE", "2"))))
         for candidate in self.cache_dir.glob("*.json"):
             if candidate.stem == digest:
                 continue
@@ -348,12 +424,41 @@ class PaymentProofOCR:
                 other_fields = other.get("fields") or {}
                 if operation and other_fields.get("operation_number") == operation:
                     duplicates.append(candidate.stem)
+                other_hash = str(other.get("perceptual_hash") or "")
+                distance = _hamming_distance(perceptual_hash, other_hash) if perceptual_hash and other_hash else None
+                if distance is not None and distance <= similarity_limit:
+                    similar_images.append({"sha256": candidate.stem, "distance": distance})
             except (OSError, ValueError):
                 continue
         checks["duplicate_operation"] = bool(duplicates)
         if duplicates:
             reason("DUPLICATE_OPERATION", "HIGH", "The operation number appears in another analyzed proof.")
+        checks["similar_image"] = bool(similar_images)
+        checks["similar_image_distance"] = min((item["distance"] for item in similar_images), default=None)
+        if similar_images:
+            reason("SIMILAR_PROOF_IMAGE", "HIGH", "This proof image is visually similar to another analyzed proof.")
 
+        receipt_time = _parse_receipt_timestamp(str(fields.get("timestamp_text") or ""))
+        checks["receipt_timestamp_parsed"] = receipt_time is not None
+        checks["receipt_age_hours"] = None
+        if not fields.get("timestamp_text"):
+            reason("TIMESTAMP_MISSING", "MEDIUM", "No receipt date and time could be extracted.")
+        elif receipt_time is None:
+            reason("TIMESTAMP_UNPARSEABLE", "MEDIUM", "The extracted receipt date and time could not be parsed.")
+        else:
+            fields["timestamp_iso"] = receipt_time.isoformat()
+            now = datetime.now(PAYMENT_TIMEZONE)
+            age_hours = (now - receipt_time).total_seconds() / 3600
+            checks["receipt_age_hours"] = round(age_hours, 2)
+            max_age_hours = max(1, int(os.environ.get("PAYMENT_RECEIPT_MAX_AGE_HOURS", "72")))
+            future_minutes = max(0, int(os.environ.get("PAYMENT_RECEIPT_FUTURE_TOLERANCE_MINUTES", "10")))
+            if receipt_time > now + timedelta(minutes=future_minutes):
+                reason("TIMESTAMP_IN_FUTURE", "HIGH", "The receipt timestamp is later than the allowed clock tolerance.")
+            elif age_hours > max_age_hours:
+                reason("TIMESTAMP_TOO_OLD", "HIGH", f"The receipt is older than the configured {max_age_hours}-hour limit.")
+
+        result["fields"] = fields
+        result["similar_images"] = similar_images
         result["checks"] = checks
         result["warnings"] = warnings
         result["review_reasons"] = review_reasons
