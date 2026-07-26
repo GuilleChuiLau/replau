@@ -2281,25 +2281,26 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
               assigning = true;
               document.querySelectorAll(".assign-selected-button").forEach((button) => button.disabled = true);
               setStatus(`Asignando ${{selected.length}} pedido(s) a ${{driverName}}…`);
-              const failures = [];
-              for (const pedidoNum of selected) {{
-                const form = new FormData();
-                form.append("pedido_num", pedidoNum);
-                form.append("repartidor_id", driverId);
-                try {{
-                  const response = await fetch("/ops/delivery/assign-driver", {{method: "POST", body: form}});
-                  if (!response.ok) failures.push(`${{pedidoNum}}: ${{(await response.text()).slice(0, 160)}}`);
-                }} catch (error) {{
-                  failures.push(`${{pedidoNum}}: ${{error.message}}`);
+              const form = new FormData();
+              form.append("pedido_nums", selected.join(","));
+              form.append("repartidor_id", driverId);
+              try {{
+                const response = await fetch("/ops/delivery/assign-driver-batch", {{method: "POST", body: form}});
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.detail || "No se pudo completar el matching");
+                if (!result.failed.length) {{
+                  setStatus(`${{result.assigned.length}} pedido(s) asignados correctamente.`);
+                  window.location.reload();
+                  return;
                 }}
-              }}
-              if (!failures.length) {{
-                setStatus(`${{selected.length}} pedido(s) asignados correctamente.`);
-                window.location.reload();
-              }} else {{
                 assigning = false;
                 document.querySelectorAll(".assign-selected-button").forEach((button) => button.disabled = false);
-                setStatus(`Algunas asignaciones fallaron: ${{failures.join(" | ")}}`, true);
+                const failures = result.failed.map((item) => `${{item.pedido_num}}: ${{item.reason}}`);
+                setStatus(`${{result.assigned.length}} asignados; fallaron: ${{failures.join(" | ")}}`, true);
+              }} catch (error) {{
+                assigning = false;
+                document.querySelectorAll(".assign-selected-button").forEach((button) => button.disabled = false);
+                setStatus(`No se pudo completar el matching: ${{error.message}}`, true);
               }}
             }});
           }});
@@ -3538,6 +3539,52 @@ def delivery_assign_driver(pedido_num: str = Form(...), repartidor_id: int = For
     if not created:
         raise HTTPException(status_code=500, detail="No se pudo crear la asignacion")
     return RedirectResponse(url="/ops/delivery#lane-assigned", status_code=303)
+
+
+@app.post("/ops/delivery/assign-driver-batch", response_class=JSONResponse)
+def delivery_assign_driver_batch(
+    pedido_nums: str = Form(...),
+    repartidor_id: int = Form(...),
+) -> JSONResponse:
+    """Assign a bounded set of orders and return an explicit per-order result."""
+    requested = [value.strip() for value in pedido_nums.split(",") if value.strip()]
+    unique = list(dict.fromkeys(requested))
+    if not unique:
+        raise HTTPException(status_code=400, detail="Selecciona al menos un pedido")
+    if len(unique) > 25:
+        raise HTTPException(status_code=400, detail="El lote admite como maximo 25 pedidos")
+
+    # Validate the driver once before changing any order. Each assignment still
+    # repeats this check to protect against the driver becoming inactive mid-batch.
+    drivers = pg_get(f"/repartidores?id=eq.{repartidor_id}&activo=eq.true&select=id&limit=1")
+    if not drivers:
+        raise HTTPException(status_code=404, detail="Repartidor activo no encontrado")
+
+    assigned: List[str] = []
+    failed: List[Dict[str, str]] = []
+    for pedido_num in unique:
+        try:
+            delivery_assign_driver(pedido_num=pedido_num, repartidor_id=repartidor_id)
+            assigned.append(pedido_num)
+        except HTTPException as exc:
+            detail = exc.detail
+            if isinstance(detail, (dict, list)):
+                reason = json.dumps(detail, ensure_ascii=False)
+            else:
+                reason = str(detail)
+            failed.append({"pedido_num": pedido_num, "reason": reason[:240]})
+        except Exception:
+            failed.append({"pedido_num": pedido_num, "reason": "Error interno al asignar"})
+
+    return JSONResponse(
+        {
+            "ok": not failed,
+            "requested": len(unique),
+            "assigned": assigned,
+            "failed": failed,
+        },
+        status_code=200 if not failed else 207,
+    )
 
 
 @app.post("/ops/picking/handoff-delivery")

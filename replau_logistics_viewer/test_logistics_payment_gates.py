@@ -80,11 +80,25 @@ class LogisticsPaymentGateContractTests(unittest.TestCase):
             'class="button good assign-selected-button"',
             'document.querySelectorAll(".matching-checkbox:checked")',
             'Asignar seleccionados',
-            'fetch("/ops/delivery/assign-driver"',
+            'fetch("/ops/delivery/assign-driver-batch"',
             '¿Asignar ${{selected.length}} pedido(s) a ${{driverName}}?',
             'action="/ops/delivery/assign-driver"',
         ):
             self.assertIn(marker, SOURCE)
+
+    def test_batch_assignment_is_bounded_and_reports_partial_results(self) -> None:
+        block = SOURCE.split('def delivery_assign_driver_batch', 1)[1].split(
+            '@app.post("/ops/picking/handoff-delivery")', 1
+        )[0]
+        for marker in (
+            'list(dict.fromkeys(requested))',
+            'if len(unique) > 25',
+            'delivery_assign_driver(pedido_num=pedido_num, repartidor_id=repartidor_id)',
+            '"assigned": assigned',
+            '"failed": failed',
+            'status_code=200 if not failed else 207',
+        ):
+            self.assertIn(marker, block)
 
     def test_delivery_migration_keeps_payment_audit_outbox_and_incident_contracts(self) -> None:
         for marker in (
