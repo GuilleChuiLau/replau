@@ -3481,40 +3481,39 @@ def delivery_assign_driver(pedido_num: str = Form(...), repartidor_id: int = For
     if not drivers:
         raise HTTPException(status_code=404, detail="Repartidor activo no encontrado")
     driver = drivers[0]
-    pedido_id = order["id"]
-    now = utc_now_iso()
-
-    active = pg_get(
-        f"/delivery_asignaciones?pedido_id=eq.{pedido_id}"
-        "&status=in.(OFFERED,ACCEPTED,ASSIGNED,PICKED_UP,EN_ROUTE,ARRIVED,FAILED)&select=id,notes"
+    active_assignments = pg_get(
+        f"/delivery_asignaciones?pedido_id=eq.{order['id']}"
+        "&status=in.(OFFERED,ACCEPTED,ASSIGNED,PICKED_UP,EN_ROUTE,ARRIVED,FAILED)"
+        "&select=id&order=id.desc&limit=1"
     )
-    for assignment in active:
-        notes = delivery_assignment_notes(
-            assignment.get("notes"),
-            f"Cancelado por reasignacion directa a {driver.get('codigo')} desde Dispatch Board",
+    expected_assignment_id = active_assignments[0]["id"] if active_assignments else None
+    idempotency_key = f"delivery-assign-{secrets.token_hex(16)}"
+    try:
+        created = pg_rpc(
+            "assign_delivery_driver_atomic",
+            {
+                "p_pedido_num": pedido_num,
+                "p_repartidor_id": repartidor_id,
+                "p_actor": "logistics-ui",
+                "p_idempotency_key": idempotency_key,
+                "p_expected_active_assignment_id": expected_assignment_id,
+            },
         )
-        pg_patch(f"/delivery_asignaciones?id=eq.{assignment['id']}", {"status": "CANCELLED", "notes": notes})
+    except requests.HTTPError as exc:
+        try:
+            detail = exc.response.json().get("message") or exc.response.text
+        except Exception:
+            detail = exc.response.text
+        raise HTTPException(status_code=409, detail=str(detail)[:500]) from exc
+    if not created.get("ok"):
+        raise HTTPException(status_code=409, detail=created)
 
-    fee_rows = pg_get("/delivery_config?key=eq.driver_fee_pen&select=value&limit=1")
-    fee = money_value((fee_rows[0] if fee_rows else {}).get("value") or 7)
-    created = pg_post(
-        "/delivery_asignaciones",
-        {
-            "pedido_id": pedido_id,
-            "repartidor_id": repartidor_id,
-            "status": "ASSIGNED",
-            "fee": fee,
-            "responded_at": now,
-            "assigned_at": now,
-            "response_text": "ASIGNADO_DESDE_DISPATCH",
-            "notes": "Asignado directamente desde Dispatch Board",
-        },
-    )
-
+    pedido_id = int(created.get("pedido_id") or order["id"])
+    fee = money_value(created.get("fee") or 0)
     address = order.get("direccion_confirmada") or order.get("direccion_detectada") or "(sin direccion)"
     maps_line = f"\nMapa: {order.get('maps_url')}\n" if order.get("maps_url") else "\n"
     message = (
-        "Pedido asignado desde Dispatch Board\n\n"
+        "Pedido asignado desde Delivery Station\n\n"
         f"Pedido: {order.get('pedido_num')}\n"
         f"Direccion:\n{address}\n"
         f"{maps_line}"
@@ -3530,13 +3529,14 @@ def delivery_assign_driver(pedido_num: str = Form(...), repartidor_id: int = For
                 "message_text": message,
                 "event_type": "CUSTOM",
                 "status": "PENDING",
+                "idempotency_key": f"{idempotency_key}:driver-notice",
             },
         )
     except Exception:
-        # The board assignment is the source of truth; outbox notification is best effort.
+        # Assignment is already committed atomically; driver notice is best effort.
         pass
 
-    if not created:
+    if not created.get("assignment_id"):
         raise HTTPException(status_code=500, detail="No se pudo crear la asignacion")
     return RedirectResponse(url="/ops/delivery#lane-assigned", status_code=303)
 

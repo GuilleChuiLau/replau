@@ -7,6 +7,8 @@ from pathlib import Path
 
 SOURCE = Path(__file__).with_name("logistics_viewer.py").read_text()
 MIGRATION = Path(__file__).parents[1].joinpath("postgrest_local/add_integrated_delivery_operations.sql").read_text()
+ATOMIC_ASSIGNMENT = Path(__file__).parents[1].joinpath("postgrest_local/add_atomic_delivery_assignment.sql").read_text()
+ATOMIC_ASSIGNMENT_TEST = Path(__file__).parents[1].joinpath("postgrest_local/test_atomic_delivery_assignment.sql").read_text()
 
 
 class LogisticsPaymentGateContractTests(unittest.TestCase):
@@ -99,6 +101,49 @@ class LogisticsPaymentGateContractTests(unittest.TestCase):
             'status_code=200 if not failed else 207',
         ):
             self.assertIn(marker, block)
+
+    def test_direct_assignment_uses_atomic_database_rpc(self) -> None:
+        block = SOURCE.split('def delivery_assign_driver(', 1)[1].split(
+            '@app.post("/ops/delivery/assign-driver-batch"', 1
+        )[0]
+        for marker in (
+            '"assign_delivery_driver_atomic"',
+            '"p_actor": "logistics-ui"',
+            '"p_idempotency_key": idempotency_key',
+            '"p_expected_active_assignment_id": expected_assignment_id',
+            '"idempotency_key": f"{idempotency_key}:driver-notice"',
+        ):
+            self.assertIn(marker, block)
+        self.assertNotIn('pg_patch(f"/delivery_asignaciones', block)
+        self.assertNotIn('pg_post(\n        "/delivery_asignaciones"', block)
+
+    def test_atomic_assignment_locks_and_audits_the_replacement(self) -> None:
+        for marker in (
+            "CREATE OR REPLACE FUNCTION api.assign_delivery_driver_atomic",
+            "FOR UPDATE OF p",
+            "FROM api.repartidores",
+            "FOR UPDATE;",
+            "Payment is not cleared for dispatch",
+            "previous_assignment_ids",
+            "Assignment conflict: order already has an active assignment",
+            "Assignment conflict: active assignment changed",
+            "'DELIVERY_ATOMIC_ASSIGNMENT'",
+            "idempotency_key",
+            "version = version + 1",
+            "GRANT EXECUTE ON FUNCTION api.assign_delivery_driver_atomic",
+        ):
+            self.assertIn(marker, ATOMIC_ASSIGNMENT)
+
+    def test_atomic_assignment_contract_is_rollback_only_and_idempotent(self) -> None:
+        for marker in (
+            "BEGIN;",
+            "ROLLBACK;",
+            "api.assign_delivery_driver_atomic(",
+            "Atomic assignment left multiple active rows",
+            "Atomic assignment audit event is missing",
+            "Idempotent replay failed",
+        ):
+            self.assertIn(marker, ATOMIC_ASSIGNMENT_TEST)
 
     def test_delivery_migration_keeps_payment_audit_outbox_and_incident_contracts(self) -> None:
         for marker in (
