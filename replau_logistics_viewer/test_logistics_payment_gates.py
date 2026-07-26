@@ -63,6 +63,29 @@ class LogisticsPaymentGateContractTests(unittest.TestCase):
         ):
             self.assertIn(marker,SOURCE)
 
+    def test_picking_can_handoff_directly_to_delivery_matching(self) -> None:
+        for marker in (
+            'action="/ops/picking/handoff-delivery"',
+            'Listo + asignar',
+            '@app.post("/ops/picking/handoff-delivery")',
+            'def picking_handoff_delivery(',
+            '"p_estado": "DESPACHADO"',
+            'return delivery_assign_driver(pedido_num=pedido_num, repartidor_id=repartidor_id)',
+        ):
+            self.assertIn(marker, SOURCE)
+
+    def test_delivery_matching_supports_checkbox_assignment_with_form_fallback(self) -> None:
+        for marker in (
+            'class="matching-checkbox"',
+            'class="button good assign-selected-button"',
+            'document.querySelectorAll(".matching-checkbox:checked")',
+            'Asignar seleccionados',
+            'fetch("/ops/delivery/assign-driver"',
+            '¿Asignar ${{selected.length}} pedido(s) a ${{driverName}}?',
+            'action="/ops/delivery/assign-driver"',
+        ):
+            self.assertIn(marker, SOURCE)
+
     def test_delivery_migration_keeps_payment_audit_outbox_and_incident_contracts(self) -> None:
         for marker in (
             "Payment is not cleared for delivery completion",

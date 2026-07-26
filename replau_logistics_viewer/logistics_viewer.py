@@ -1596,6 +1596,14 @@ def render_order_page(data: Dict[str, Any], token: str) -> str:
 
 def render_picking_station_page(data: Dict[str, Any]) -> str:
     orders = [o for o in data["orders"] if order_workflow_stage(o) == "picking" and order_token(o)]
+    active_drivers = [
+        driver for driver in fetch_delivery_overview().get("drivers", [])
+        if bool(driver.get("activo"))
+    ]
+    driver_options = "".join(
+        f'<option value="{esc(driver.get("id"))}">{esc(driver.get("codigo"))} - {esc(driver.get("nombre"))}</option>'
+        for driver in active_drivers
+    )
     item_rows_by_pedido_id: Dict[Any, List[Dict[str, Any]]] = {}
     for item in data.get("items", []):
         item_rows_by_pedido_id.setdefault(item.get("pedido_id"), []).append(item)
@@ -1613,6 +1621,20 @@ def render_picking_station_page(data: Dict[str, Any]) -> str:
         notes = str(order.get("observacion") or "").strip()
         notes_html = f'<div class="station-notes"><strong>Notas:</strong><br>{esc(notes)}</div>' if notes else ""
         maps_url = order.get("maps_url") or "#"
+        pickup_order = is_pickup_fulfillment(order)
+        handoff_form = ""
+        if not pickup_order and active_drivers:
+            handoff_form = f"""
+                <form method="post" action="/ops/picking/handoff-delivery" class="picking-handoff-form">
+                  <input type="hidden" name="pedido_num" value="{pedido_num}">
+                  <input type="hidden" name="token" value="{esc(token)}">
+                  <select name="repartidor_id" aria-label="Repartidor para {pedido_num}" required>
+                    <option value="">Seleccionar repartidor</option>
+                    {driver_options}
+                  </select>
+                  <button class="button good" type="submit">Listo + asignar</button>
+                </form>
+            """
         card_class = "station-card first" if idx == 1 else "station-card"
         cards += f"""
         <section class="{card_class}">
@@ -1638,6 +1660,7 @@ def render_picking_station_page(data: Dict[str, Any]) -> str:
               </div>
               {notes_html}
               {payment_gate_callout(order)}
+              {handoff_form}
               <div class="actions station-actions">
                 <a class="button" href="/ops/picking/{pedido_num}?token={quote(token, safe='')}">Abrir pedido</a>
                 <a class="button secondary" href="{esc(maps_url)}" target="_blank">Maps</a>
@@ -1697,8 +1720,10 @@ def render_picking_station_page(data: Dict[str, Any]) -> str:
         .driver-btn {{ width:100%; min-height:58px; font-size:18px; border-radius:18px; }}
         .station-actions {{ margin-top:12px; align-items:center; }}
         .station-actions form {{ display:inline-flex; margin:0; }}
+        .picking-handoff-form {{ display:grid; grid-template-columns:1fr auto; gap:10px; margin-top:14px; padding:14px; border:1px solid rgba(34,197,94,.32); border-radius:16px; background:rgba(34,197,94,.08); }}
+        .picking-handoff-form select {{ min-height:46px; padding:10px; }}
         .station-empty {{ color:#94a3b8; padding:14px; }}
-        @media(max-width:900px) {{ .station-grid, .station-card-head {{ grid-template-columns:1fr; display:block; }} .station-badges {{ justify-content:flex-start; margin-top:12px; }} .driver-quick-actions {{ grid-template-columns:1fr; }} }}
+        @media(max-width:900px) {{ .station-grid, .station-card-head {{ grid-template-columns:1fr; display:block; }} .station-badges {{ justify-content:flex-start; margin-top:12px; }} .driver-quick-actions,.picking-handoff-form {{ grid-template-columns:1fr; }} }}
       </style>
       {cards}
     </div>
@@ -1922,21 +1947,20 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
     )
     driver_cards = "".join(
         f"""
-        <div class="dispatch-driver-card">
+        <div class="dispatch-driver-card driver-assign-card" data-driver-id="{esc(driver.get('id'))}" data-driver-name="{esc(driver.get('nombre'))}">
           <strong>{esc(driver.get('codigo'))}</strong>
           <span>{esc(driver.get('nombre'))}</span>
           <b>{driver_load.get(int(driver.get('id') or 0), 0)} activas</b>
+          <button class="button good assign-selected-button" type="button">Asignar seleccionados</button>
         </div>
         """
         for driver in active_drivers
     ) or '<div class="dispatch-driver-card muted">No hay repartidores activos.</div>'
 
     summary_cards = [
-        ("Delivery / recojo", len(orders)),
-        ("Sin repartidor", lane_counts.get("unassigned", 0)),
-        ("Ofrecidos", lane_counts.get("offered", 0)),
-        ("En ruta / llegaron", lane_counts.get("en_route", 0) + lane_counts.get("arrived", 0)),
-        ("Repartidores activos", len(active_drivers)),
+        ("Pedidos", len(orders)),
+        ("Por asignar", lane_counts.get("unassigned", 0)),
+        ("Repartidores disponibles", len(active_drivers)),
     ]
     summary_html = "".join(
         f'<div class="summary-card dispatch-kpi"><div class="k">{esc(label)}</div><div class="v">{esc(value)}</div></div>'
@@ -2066,29 +2090,102 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
     else:
         cards = '<div class="panel"><h2>Sin pedidos para delivery</h2><p class="muted">Cuando Picking despache un pedido, aparecerá aquí automáticamente.</p></div>'
 
+    simple_order_rows = ""
+    matching_rows = ""
+    for order in orders:
+        pedido_num_raw = str(order.get("pedido_num") or "")
+        pedido_num = esc(pedido_num_raw)
+        token = order_token(order)
+        assignment = order_assignments.get(order.get("id"))
+        pickup_order = is_pickup_fulfillment(order)
+        address = order.get("direccion_confirmada") or order.get("direccion_detectada") or "Sin dirección"
+        status = "Recojo cliente" if pickup_order else str((assignment or {}).get("status") or "Por asignar")
+        driver_name = "No requiere repartidor" if pickup_order else (
+            (assignment or {}).get("repartidor_nombre")
+            or (assignment or {}).get("repartidor_codigo")
+            or "Sin repartidor"
+        )
+        selection_checkbox = (
+            f'<label class="order-selector"><input class="matching-checkbox" type="checkbox" value="{pedido_num}"><span>Seleccionar para matching</span></label>'
+            if not pickup_order and not assignment else ""
+        )
+        simple_order_rows += f"""
+        <article class="simple-order">
+          <div>
+            <strong>{pedido_num}</strong>
+            <span>{esc(order.get('cliente_nombre'))} · {money(order.get('total'))}</span>
+            <small>{esc(address)}</small>
+            {selection_checkbox}
+          </div>
+          <div class="simple-order-status">
+            {badge_html(status)}
+            <span>{esc(driver_name)}</span>
+          </div>
+          <a class="button secondary" href="/ops/delivery/{pedido_num}?token={quote(token, safe='')}">Ver</a>
+        </article>
+        """
+        if not pickup_order and not assignment:
+            matching_rows += f"""
+            <article class="match-row">
+              <div>
+                <strong>{pedido_num}</strong>
+                <span>{esc(order.get('cliente_nombre'))}</span>
+              </div>
+              <form method="post" action="/ops/delivery/assign-driver">
+                <input type="hidden" name="pedido_num" value="{pedido_num}">
+                <select name="repartidor_id" aria-label="Repartidor para {pedido_num}" required>
+                  <option value="">Seleccionar repartidor</option>
+                  {driver_options}
+                </select>
+                <button class="button good" type="submit">Asignar</button>
+              </form>
+              <form method="post" action="/ops/delivery/offer-next">
+                <input type="hidden" name="pedido_num" value="{pedido_num}">
+                <button class="button secondary" type="submit">Asignación automática</button>
+              </form>
+            </article>
+            """
+
+    simple_order_rows = simple_order_rows or '<div class="simple-empty">No hay pedidos listos para delivery.</div>'
+    matching_rows = matching_rows or '<div class="simple-empty">No hay pedidos pendientes de asignación.</div>'
+
     body = f"""
     <div class="page delivery-station picking-station">
       <div class="topbar">
         <div>
           <h1>Delivery Station</h1>
-          <div class="muted">Pantalla fija para delivery y recojo cliente. Auto-refresh cada 10s.</div>
+          <div class="muted">Repartidores, pedidos y asignación en una sola pantalla.</div>
         </div>
         <div class="actions">
-          <span class="chip">{len(orders)} pedidos delivery/recojo</span>
           <a class="button" href="/ops/delivery">Actualizar</a>
           <a class="button secondary" href="/dashboard">Dashboard</a>
         </div>
       </div>
       <div class="grid-cards dispatch-kpis">{summary_html}</div>
-      <div class="panel dispatch-board-panel">
-        <div class="panel-head"><h2>Dispatch Board</h2><div class="panel-sub">Lanes operativas, carga por repartidor y asignación directa desde la misma pantalla.</div></div>
-        <div class="dispatch-board-tools">
-          <div class="chips">{lane_nav}</div>
+      <div class="simple-delivery-grid">
+        <section class="panel simple-panel">
+          <div class="panel-head">
+            <div><h2>Repartidores disponibles</h2><div class="panel-sub">Selecciona pedidos y pulsa el botón del repartidor para asignarlos.</div></div>
+            <span class="chip">{len(active_drivers)}</span>
+          </div>
           <div class="dispatch-driver-strip">{driver_cards}</div>
-        </div>
+          <div id="assignmentStatus" class="assignment-status" role="status" aria-live="polite"></div>
+        </section>
+        <section class="panel simple-panel">
+          <div class="panel-head">
+            <div><h2>Pedidos</h2><div class="panel-sub">Pedidos listos y su asignación actual.</div></div>
+            <span class="chip">{len(orders)}</span>
+          </div>
+          <div class="simple-order-list">{simple_order_rows}</div>
+        </section>
+        <section class="panel simple-panel matching-panel">
+          <div class="panel-head">
+            <div><h2>Matching</h2><div class="panel-sub">Une cada pedido con un repartidor.</div></div>
+            <span class="chip">{lane_counts.get("unassigned", 0)}</span>
+          </div>
+          <div class="matching-list">{matching_rows}</div>
+        </section>
       </div>
-      {render_delivery_ops_panel()}
-      {render_sucursales_panel()}
       <style>
         .delivery-station .station-card {{ background:linear-gradient(180deg, rgba(15,23,42,.98), rgba(17,24,39,.96)); border:1px solid rgba(34,197,94,.26); border-top:5px solid var(--green); border-radius:26px; padding:22px; margin:18px 0; box-shadow:0 22px 55px rgba(0,0,0,.28); }}
         .delivery-station .station-card.first {{ border-top-color:var(--orange); box-shadow:0 24px 70px rgba(139,92,246,.16); }}
@@ -2126,7 +2223,7 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
         .station-actions.compact-actions .button {{ min-height:44px; }}
         .station-actions form {{ display:inline-flex; margin:0; }}
         .station-empty {{ color:#94a3b8; padding:14px; }}
-        .dispatch-kpis {{ grid-template-columns:repeat(5, minmax(0, 1fr)); }}
+        .dispatch-kpis {{ grid-template-columns:repeat(3, minmax(0, 1fr)); }}
         .dispatch-kpi .v {{ color:#bbf7d0; }}
         .dispatch-board-panel {{ border-top-color:#22c55e; }}
         .dispatch-board-tools {{ display:grid; grid-template-columns:1fr; gap:14px; }}
@@ -2135,15 +2232,79 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
         .dispatch-driver-card strong {{ color:#bbf7d0; }}
         .dispatch-driver-card span {{ color:#e5e7eb; font-size:13px; font-weight:800; }}
         .dispatch-driver-card b {{ color:#94a3b8; font-size:12px; }}
+        .assign-selected-button {{ margin-top:8px; width:100%; }}
+        .simple-delivery-grid {{ display:grid; gap:20px; }}
+        .simple-panel {{ margin:0; border-top-color:#22c55e; }}
+        .simple-order-list,.matching-list {{ display:grid; gap:10px; }}
+        .simple-order {{ display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:16px; padding:14px; border:1px solid var(--line); border-radius:16px; background:#0b1220; }}
+        .order-selector {{ display:flex; align-items:center; gap:8px; margin-top:10px; color:#86efac; font-size:12px; font-weight:850; cursor:pointer; }}
+        .order-selector input {{ width:20px; height:20px; accent-color:#22c55e; }}
+        .order-selector span {{ color:#86efac !important; margin:0 !important; }}
+        .assignment-status {{ min-height:20px; margin-top:10px; color:#bbf7d0; font-size:13px; font-weight:800; }}
+        .assignment-status.error {{ color:#fecaca; }}
+        .simple-order strong,.match-row strong {{ display:block; color:#f8fafc; font-size:18px; }}
+        .simple-order span,.match-row span {{ display:block; color:#cbd5e1; margin-top:3px; }}
+        .simple-order small {{ display:block; color:#94a3b8; margin-top:5px; }}
+        .simple-order-status {{ text-align:right; }}
+        .simple-order-status span {{ font-size:13px; }}
+        .match-row {{ display:grid; grid-template-columns:minmax(150px,.7fr) minmax(300px,1.5fr) auto; align-items:end; gap:12px; padding:14px; border:1px solid rgba(34,197,94,.28); border-radius:16px; background:rgba(34,197,94,.06); }}
+        .match-row form {{ display:flex; gap:10px; margin:0; }}
+        .match-row select {{ min-height:44px; padding:10px; width:100%; }}
+        .simple-empty {{ padding:22px; text-align:center; color:#94a3b8; border:1px dashed var(--line); border-radius:16px; }}
         .dispatch-lane {{ margin:24px 0 30px; scroll-margin-top:16px; }}
         .dispatch-lane-head {{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 10px; padding:0 4px; }}
         .dispatch-lane-head h2 {{ margin:0; color:#f8fafc; font-size:26px; letter-spacing:-.02em; }}
         .dispatch-assign-form {{ margin-top:14px; display:grid; grid-template-columns:1fr auto; gap:10px; align-items:end; }}
         .dispatch-assign-form select {{ width:100%; min-height:46px; padding:11px; }}
         @media(max-width:900px) {{ .station-grid, .station-card-head {{ grid-template-columns:1fr; display:block; }} .station-badges {{ justify-content:flex-start; margin-top:12px; }} .driver-quick-actions,.dispatch-settings {{ grid-template-columns:1fr; }} }}
-        @media(max-width:900px) {{ .dispatch-kpis {{ grid-template-columns:1fr 1fr; }} .dispatch-assign-form {{ grid-template-columns:1fr; }} }}
+        @media(max-width:900px) {{ .dispatch-kpis {{ grid-template-columns:1fr; }} .dispatch-assign-form,.simple-order,.match-row {{ grid-template-columns:1fr; }} .simple-order-status {{ text-align:left; }} .match-row form {{ flex-direction:column; }} }}
       </style>
-      {cards}
+      <script>
+        (() => {{
+          let assigning = false;
+          const status = document.getElementById("assignmentStatus");
+          const setStatus = (message, error = false) => {{
+            status.textContent = message;
+            status.classList.toggle("error", error);
+          }};
+          document.querySelectorAll(".driver-assign-card[data-driver-id]").forEach((card) => {{
+            card.querySelector(".assign-selected-button").addEventListener("click", async () => {{
+              const selected = [...document.querySelectorAll(".matching-checkbox:checked")].map((box) => box.value);
+              const driverId = card.dataset.driverId;
+              const driverName = card.dataset.driverName;
+              if (!selected.length) {{
+                setStatus("Selecciona al menos un pedido pendiente.", true);
+                return;
+              }}
+              if (assigning) return;
+              if (!window.confirm(`¿Asignar ${{selected.length}} pedido(s) a ${{driverName}}?`)) return;
+              assigning = true;
+              document.querySelectorAll(".assign-selected-button").forEach((button) => button.disabled = true);
+              setStatus(`Asignando ${{selected.length}} pedido(s) a ${{driverName}}…`);
+              const failures = [];
+              for (const pedidoNum of selected) {{
+                const form = new FormData();
+                form.append("pedido_num", pedidoNum);
+                form.append("repartidor_id", driverId);
+                try {{
+                  const response = await fetch("/ops/delivery/assign-driver", {{method: "POST", body: form}});
+                  if (!response.ok) failures.push(`${{pedidoNum}}: ${{(await response.text()).slice(0, 160)}}`);
+                }} catch (error) {{
+                  failures.push(`${{pedidoNum}}: ${{error.message}}`);
+                }}
+              }}
+              if (!failures.length) {{
+                setStatus(`${{selected.length}} pedido(s) asignados correctamente.`);
+                window.location.reload();
+              }} else {{
+                assigning = false;
+                document.querySelectorAll(".assign-selected-button").forEach((button) => button.disabled = false);
+                setStatus(`Algunas asignaciones fallaron: ${{failures.join(" | ")}}`, true);
+              }}
+            }});
+          }});
+        }})();
+      </script>
     </div>
     """
     return render_layout("Delivery Station - Replau", body, auto_refresh_seconds=10)
@@ -3377,6 +3538,36 @@ def delivery_assign_driver(pedido_num: str = Form(...), repartidor_id: int = For
     if not created:
         raise HTTPException(status_code=500, detail="No se pudo crear la asignacion")
     return RedirectResponse(url="/ops/delivery#lane-assigned", status_code=303)
+
+
+@app.post("/ops/picking/handoff-delivery")
+def picking_handoff_delivery(
+    pedido_num: str = Form(...),
+    token: str = Form(...),
+    repartidor_id: int = Form(...),
+) -> RedirectResponse:
+    """Move a ready order into Delivery and assign it in one operator action."""
+    order_data = fetch_public_order(pedido_num, token)
+    order = order_data.get("order") or {}
+    if is_pickup_fulfillment(order):
+        raise HTTPException(status_code=409, detail="Los pedidos para recojo no requieren repartidor")
+    if not payment_dispatch_allowed(order):
+        raise HTTPException(status_code=409, detail=payment_gate_reason(order))
+
+    result = pg_rpc(
+        "actualizar_estado_pedido_publico",
+        {
+            "p_pedido_num": pedido_num,
+            "p_token": token,
+            "p_estado": "DESPACHADO",
+        },
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=403, detail=result)
+
+    # Assignment repeats its own payment and active-driver checks. If it fails,
+    # the dispatched order remains visible in Delivery's matching queue.
+    return delivery_assign_driver(pedido_num=pedido_num, repartidor_id=repartidor_id)
 
 
 @app.post("/ops/delivery/transition")
