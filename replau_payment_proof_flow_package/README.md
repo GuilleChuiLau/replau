@@ -11,6 +11,14 @@ duplicate-operation warnings, and comparison with the order total. Set
 list of valid recipient names or identifying fragments to enable recipient
 matching.
 
+The OCR pipeline runs the original image plus contrast-enhanced and adaptive
+threshold passes when OpenCV is available. It merges the strongest text result
+from each pass, recognizes common Yape, Plin, BCP, BBVA, Interbank, and
+Scotiabank receipt wording, and reports confidence separately for provider,
+amount, recipient, operation number, timestamp, and success wording. Cashier
+alerts include stable reason codes and severity so an operator can distinguish
+an amount mismatch from a low-confidence extraction or an unknown provider.
+
 OCR is advisory only. It must not automatically approve a payment because a
 screenshot can be edited or reused and does not prove settlement. Keep manual
 review enabled unless the transaction is reconciled with an authoritative bank

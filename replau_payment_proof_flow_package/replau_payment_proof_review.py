@@ -329,8 +329,10 @@ def check_row(label: str, value: Any, pass_text: str, fail_text: str, unknown_te
 
 def render_ocr_result(result: Dict[str, Any], order_total: Any) -> str:
     fields = result.get("fields") or {}
+    field_confidence = result.get("field_confidence") or {}
     checks = result.get("checks") or {}
     warnings = result.get("warnings") or []
+    review_reasons = result.get("review_reasons") or []
     has_warning = bool(warnings)
     recommendation = "REVISAR O RECHAZAR" if has_warning else "APTO PARA REVISIÓN MANUAL"
     decision_css = "review" if has_warning else "clear"
@@ -340,22 +342,22 @@ def render_ocr_result(result: Dict[str, Any], order_total: Any) -> str:
         <p class="muted">Use estos resultados junto con la imagen original. El OCR orienta la decisión, pero no confirma que el dinero haya sido abonado.</p>
       </div>
       <div class="ocr-summary">
-        <div class="ocr-item"><span>Proveedor</span><strong>{esc(fields.get('provider') or 'No detectado')}</strong></div>
-        <div class="ocr-item"><span>Monto detectado</span><strong>{money(fields.get('amount'))}</strong></div>
+        <div class="ocr-item"><span>Proveedor</span><strong>{esc(fields.get('provider') or 'No detectado')}</strong><small>{float(field_confidence.get('provider') or 0) * 100:.1f}% confianza</small></div>
+        <div class="ocr-item"><span>Monto detectado</span><strong>{money(fields.get('amount'))}</strong><small>{float(field_confidence.get('amount') or 0) * 100:.1f}% confianza</small></div>
         <div class="ocr-item"><span>Total del pedido</span><strong>{money(order_total)}</strong></div>
-        <div class="ocr-item"><span>Destinatario</span><strong>{esc(fields.get('recipient') or 'No detectado')}</strong></div>
-        <div class="ocr-item"><span>Número de operación</span><strong>{esc(fields.get('operation_number') or 'No detectado')}</strong></div>
-        <div class="ocr-item"><span>Fecha y hora</span><strong>{esc(fields.get('timestamp_text') or 'No detectada')}</strong></div>
+        <div class="ocr-item"><span>Destinatario</span><strong>{esc(fields.get('recipient') or 'No detectado')}</strong><small>{float(field_confidence.get('recipient') or 0) * 100:.1f}% confianza</small></div>
+        <div class="ocr-item"><span>Número de operación</span><strong>{esc(fields.get('operation_number') or 'No detectado')}</strong><small>{float(field_confidence.get('operation_number') or 0) * 100:.1f}% confianza</small></div>
+        <div class="ocr-item"><span>Fecha y hora</span><strong>{esc(fields.get('timestamp_text') or 'No detectada')}</strong><small>{float(field_confidence.get('timestamp_text') or 0) * 100:.1f}% confianza</small></div>
         <div class="ocr-item"><span>Confianza OCR</span><strong>{float(result.get('ocr_confidence') or 0) * 100:.1f}%</strong></div>
         <div class="ocr-item"><span>Texto de pago exitoso</span><strong>{'Detectado' if fields.get('success_text_detected') else 'No detectado'}</strong></div>
-        <div class="ocr-item"><span>Motor</span><strong>{esc(result.get('engine') or 'No disponible')}</strong></div>
+        <div class="ocr-item"><span>Motor/pasadas</span><strong>{esc(result.get('engine') or 'No disponible')}</strong><small>{esc(', '.join(result.get('ocr_passes') or []))}</small></div>
       </div>
       <h3>Validaciones</h3>
       {check_row('Monto', checks.get('amount_match'), 'COINCIDE', 'NO COINCIDE', 'NO SE PUDO VALIDAR')}
       {check_row('Destinatario', checks.get('recipient_match'), 'COINCIDE', 'NO COINCIDE', 'NOMBRES NO CONFIGURADOS')}
       {check_row('Operación única', None if checks.get('duplicate_operation') is None else not checks.get('duplicate_operation'), 'NO DUPLICADA', 'DUPLICADA — REVISAR', 'NO SE PUDO VALIDAR')}
       <h3>Alertas</h3>
-      {''.join(f'<div class="warning">{esc(w)}</div>' for w in warnings) or '<p class="ok"><strong>Sin alertas de consistencia.</strong></p>'}
+      {''.join(f'<div class="warning"><strong>{esc(r.get("severity"))} · {esc(r.get("code"))}</strong><br>{esc(r.get("message"))}</div>' for r in review_reasons) or '<p class="ok"><strong>Sin alertas de consistencia.</strong></p>'}
       <p class="muted"><strong>Decisión humana obligatoria:</strong> compare el comprobante, el pedido y estas validaciones antes de aprobar o rechazar.</p>
     """
 
