@@ -139,6 +139,8 @@ class LogisticsPaymentGateContractTests(unittest.TestCase):
             "BEGIN;",
             "ROLLBACK;",
             "api.assign_delivery_driver_atomic(",
+            "Production may correctly have no open orders",
+            "SET estado = 'DESPACHADO'",
             "Atomic assignment left multiple active rows",
             "Atomic assignment audit event is missing",
             "Idempotent replay failed",

@@ -15,8 +15,7 @@ BEGIN
     INTO v_order
     FROM api.pedidos p
     JOIN api.payment_fulfillments pf ON pf.pedido_id = p.id
-    WHERE upper(COALESCE(p.estado, '')) NOT IN ('ENTREGADO', 'ANULADO', 'CANCELLED')
-      AND (
+    WHERE (
           (
               upper(COALESCE(p.metodo_pago, '')) = 'CONTRA_ENTREGA'
               AND pf.status IN ('COD_DUE', 'COD_COLLECTED', 'RECONCILED', 'SETTLED')
@@ -31,8 +30,14 @@ BEGIN
     ORDER BY p.id DESC
     LIMIT 1;
     IF v_order.id IS NULL THEN
-        RAISE EXCEPTION 'An assignable delivery order fixture is required';
+        RAISE EXCEPTION 'A payment-cleared delivery order fixture is required';
     END IF;
+
+    -- Production may correctly have no open orders. Temporarily make the
+    -- selected fixture assignable; the outer transaction rolls this back.
+    UPDATE api.pedidos
+    SET estado = 'DESPACHADO'
+    WHERE id = v_order.id;
 
     SELECT id, codigo INTO v_driver
     FROM api.repartidores
