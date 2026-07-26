@@ -9,6 +9,8 @@ SOURCE = Path(__file__).with_name("logistics_viewer.py").read_text()
 MIGRATION = Path(__file__).parents[1].joinpath("postgrest_local/add_integrated_delivery_operations.sql").read_text()
 ATOMIC_ASSIGNMENT = Path(__file__).parents[1].joinpath("postgrest_local/add_atomic_delivery_assignment.sql").read_text()
 ATOMIC_ASSIGNMENT_TEST = Path(__file__).parents[1].joinpath("postgrest_local/test_atomic_delivery_assignment.sql").read_text()
+LOAD_MATCHING = Path(__file__).parents[1].joinpath("postgrest_local/add_load_aware_delivery_matching.sql").read_text()
+LOAD_MATCHING_TEST = Path(__file__).parents[1].joinpath("postgrest_local/test_load_aware_delivery_matching.sql").read_text()
 
 
 class LogisticsPaymentGateContractTests(unittest.TestCase):
@@ -146,6 +148,43 @@ class LogisticsPaymentGateContractTests(unittest.TestCase):
             "Idempotent replay failed",
         ):
             self.assertIn(marker, ATOMIC_ASSIGNMENT_TEST)
+
+    def test_automatic_matching_is_load_aware_and_bounded(self) -> None:
+        for marker in (
+            "max_active_deliveries_per_driver",
+            "FOR UPDATE OF p",
+            "FOR UPDATE OF r SKIP LOCKED",
+            "score.active_load < v_max_active",
+            "score.active_load ASC",
+            "score.pending_offers ASC",
+            "score.last_assignment_at ASC NULLS FIRST",
+            "'DELIVERY_LOAD_AWARE_OFFER'",
+            "'selection_reason'",
+            "'Payment is not cleared for dispatch'",
+        ):
+            self.assertIn(marker, LOAD_MATCHING)
+
+    def test_load_aware_matching_contract_is_rollback_only(self) -> None:
+        for marker in (
+            "BEGIN;",
+            "ROLLBACK;",
+            "SET estado = 'DESPACHADO'",
+            "api.ofrecer_delivery_a_siguiente_repartidor",
+            "Load-aware matching did not explain its selection",
+            "Load-aware offer audit event is missing",
+        ):
+            self.assertIn(marker, LOAD_MATCHING_TEST)
+
+    def test_delivery_station_explains_automatic_match_selection(self) -> None:
+        for marker in (
+            'match_driver: str = Query("")',
+            'match_load: str = Query("")',
+            'data["automatic_match_notice"] = notice',
+            '"match_driver": data.get("repartidor_nombre")',
+            '"match_reason": data.get("selection_reason", "")',
+            'class="match-notice"',
+        ):
+            self.assertIn(marker, SOURCE)
 
     def test_delivery_migration_keeps_payment_audit_outbox_and_incident_contracts(self) -> None:
         for marker in (

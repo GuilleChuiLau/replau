@@ -2148,6 +2148,9 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
 
     simple_order_rows = simple_order_rows or '<div class="simple-empty">No hay pedidos listos para delivery.</div>'
     matching_rows = matching_rows or '<div class="simple-empty">No hay pedidos pendientes de asignación.</div>'
+    matching_notice = ""
+    if data.get("automatic_match_notice"):
+        matching_notice = f'<div class="match-notice">{esc(data["automatic_match_notice"])}</div>'
 
     body = f"""
     <div class="page delivery-station picking-station">
@@ -2162,6 +2165,7 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
         </div>
       </div>
       <div class="grid-cards dispatch-kpis">{summary_html}</div>
+      {matching_notice}
       <div class="simple-delivery-grid">
         <section class="panel simple-panel">
           <div class="panel-head">
@@ -2242,6 +2246,7 @@ def render_delivery_station_page(data: Dict[str, Any]) -> str:
         .order-selector span {{ color:#86efac !important; margin:0 !important; }}
         .assignment-status {{ min-height:20px; margin-top:10px; color:#bbf7d0; font-size:13px; font-weight:800; }}
         .assignment-status.error {{ color:#fecaca; }}
+        .match-notice {{ margin:0 0 18px; padding:14px 16px; color:#bbf7d0; background:rgba(34,197,94,.10); border:1px solid rgba(34,197,94,.34); border-radius:16px; font-weight:800; }}
         .simple-order strong,.match-row strong {{ display:block; color:#f8fafc; font-size:18px; }}
         .simple-order span,.match-row span {{ display:block; color:#cbd5e1; margin-top:3px; }}
         .simple-order small {{ display:block; color:#94a3b8; margin-top:5px; }}
@@ -3433,11 +3438,23 @@ def picking_page(pedido_num: str, token: str = Query(...)) -> HTMLResponse:
 
 
 @app.get("/ops/delivery", response_class=HTMLResponse)
-def delivery_station_page(limit: int = Query(100, ge=1, le=250)) -> HTMLResponse:
+def delivery_station_page(
+    limit: int = Query(100, ge=1, le=250),
+    match_driver: str = Query(""),
+    match_load: str = Query(""),
+    match_reason: str = Query(""),
+) -> HTMLResponse:
     try:
         data = fetch_dashboard_data(limit=limit)
     except requests.HTTPError as exc:
         raise HTTPException(status_code=500, detail=exc.response.text)
+    if match_driver:
+        notice = f"Matching automático: {match_driver}"
+        if match_load:
+            notice += f" · {match_load} entrega(s) activa(s) antes de la oferta"
+        if match_reason:
+            notice += f" · {match_reason}"
+        data["automatic_match_notice"] = notice
     return HTMLResponse(render_delivery_station_page(data))
 
 
@@ -3462,7 +3479,14 @@ def delivery_offer_next(pedido_num: str = Form(...)) -> RedirectResponse:
     data = pg_rpc("ofrecer_delivery_a_siguiente_repartidor", {"p_pedido_id": order["id"]})
     if not data.get("ok"):
         raise HTTPException(status_code=409, detail=data)
-    return RedirectResponse(url="/ops/delivery", status_code=303)
+    query = urlencode(
+        {
+            "match_driver": data.get("repartidor_nombre") or data.get("repartidor_codigo") or "Repartidor seleccionado",
+            "match_load": data.get("active_load_before_offer", ""),
+            "match_reason": data.get("selection_reason", ""),
+        }
+    )
+    return RedirectResponse(url=f"/ops/delivery?{query}", status_code=303)
 
 
 @app.post("/ops/delivery/assign-driver")
