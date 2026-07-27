@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import html
 import json
 import os
 import re
 import secrets
+import time
 from binascii import Error as Base64Error
 from base64 import b64decode
 from datetime import datetime, timezone
@@ -28,6 +30,10 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()
 REQUIRE_DRIVER_AUTH = os.environ.get("REQUIRE_DRIVER_AUTH", "true").lower() == "true"
 DRIVER_AUTH_USERNAME = os.environ.get("DRIVER_AUTH_USERNAME", "driver").strip()
 DRIVER_AUTH_PASSWORD = os.environ.get("DRIVER_AUTH_PASSWORD", "").strip()
+DRIVER_SESSION_SECRET = os.environ.get("DRIVER_SESSION_SECRET", "").strip()
+DRIVER_SESSION_TTL_SECONDS = int(os.environ.get("DRIVER_SESSION_TTL_SECONDS", "28800"))
+DRIVER_SESSION_COOKIE_SECURE = os.environ.get("DRIVER_SESSION_COOKIE_SECURE", "false").lower() == "true"
+DRIVER_SESSION_COOKIE = "replau_driver_session"
 DRIVER_DOCUMENT_DIR = Path(
     os.environ.get("REPLAU_DRIVER_DOCUMENT_DIR", "/home/guill/.openclaw/workspace/replau_driver_documents")
 ).resolve()
@@ -75,6 +81,61 @@ def utc_now_iso() -> str:
 
 def clean_phone(value: str) -> str:
     return "".join(ch for ch in (value or "") if ch.isdigit())
+
+
+def hash_pin(pin: str, salt: bytes) -> str:
+    return hashlib.scrypt(
+        pin.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=32
+    ).hex()
+
+
+def valid_pin_format(pin: str) -> bool:
+    return bool(re.fullmatch(r"[0-9]{6,12}", pin or ""))
+
+
+def request_fingerprint(request: Request) -> tuple[str, str]:
+    forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    remote = forwarded or (request.client.host if request.client else "")
+    ip_hash = hashlib.sha256(("replau-driver:" + remote).encode()).hexdigest() if remote else ""
+    return ip_hash, request.headers.get("user-agent", "")[:300]
+
+
+def session_signature(payload: str) -> str:
+    if not DRIVER_SESSION_SECRET:
+        raise HTTPException(status_code=503, detail="Driver sessions are not configured")
+    return hmac.new(DRIVER_SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+
+def create_driver_session(account_id: int, credential_version: int) -> str:
+    payload = f"{account_id}.{credential_version}.{int(time.time()) + DRIVER_SESSION_TTL_SECONDS}.{secrets.token_hex(12)}"
+    return payload + "." + session_signature(payload)
+
+
+def session_claims(request: Request) -> tuple[int, int]:
+    token = request.cookies.get(DRIVER_SESSION_COOKIE, "")
+    try:
+        account_text, version_text, expiry_text, nonce, signature = token.split(".", 4)
+        payload = ".".join((account_text, version_text, expiry_text, nonce))
+        if not hmac.compare_digest(signature, session_signature(payload)):
+            raise ValueError("signature")
+        if int(expiry_text) < int(time.time()):
+            raise ValueError("expired")
+        return int(account_text), int(version_text)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=401, detail="Driver login required")
+
+
+def require_driver_session(request: Request, account_id: int) -> Dict[str, Any]:
+    session_account_id, credential_version = session_claims(request)
+    if session_account_id != account_id:
+        raise HTTPException(status_code=403, detail="Driver session does not match this account")
+    rows = pg_get(
+        f"/driver_auth_credentials?driver_account_id=eq.{account_id}"
+        "&select=driver_account_id,credential_version&limit=1"
+    )
+    if not rows or int(rows[0]["credential_version"]) != credential_version:
+        raise HTTPException(status_code=401, detail="Driver session was revoked")
+    return rows[0]
 
 
 def check_admin_auth(request: Request, x_admin_token: Optional[str] = None) -> None:
@@ -319,6 +380,9 @@ def driver_home(flash: str = "") -> HTMLResponse:
           <label>Phone
             <input name="phone" inputmode="tel" placeholder="51999999999" required>
           </label>
+          <label>Personal PIN
+            <input name="pin" type="password" inputmode="numeric" minlength="6" maxlength="12" autocomplete="current-password" required>
+          </label>
           <button class="good" type="submit">Open app</button>
         </form>
       </section>
@@ -395,16 +459,73 @@ def driver_app_url(account_id: int, flash: str = "") -> str:
 
 
 @app.post("/driver/app/login")
-def driver_app_login(phone: str = Form(...)) -> RedirectResponse:
+def driver_app_login(request: Request, phone: str = Form(...), pin: str = Form(...)) -> RedirectResponse:
     clean = clean_phone(phone)
-    rows = pg_get(f"/v_driver_accounts?phone=eq.{quote(clean, safe='')}&limit=1")
+    rows = pg_get(
+        f"/v_driver_accounts?phone=eq.{quote(clean, safe='')}"
+        "&select=id,status,repartidor_id&limit=1"
+    )
     if not rows:
-        return RedirectResponse(url="/driver?flash=Application+not+found", status_code=303)
-    return RedirectResponse(url=driver_app_url(int(rows[0]["id"])), status_code=303)
+        return RedirectResponse(url="/driver?flash=Invalid+phone+or+PIN", status_code=303)
+    account_id = int(rows[0]["id"])
+    credentials = pg_get(
+        f"/driver_auth_credentials?driver_account_id=eq.{account_id}&limit=1"
+    )
+    if not credentials:
+        return RedirectResponse(url="/driver?flash=PIN+not+configured.+Contact+dispatch.", status_code=303)
+    credential = credentials[0]
+    ip_hash, user_agent = request_fingerprint(request)
+    locked_until = credential.get("locked_until")
+    if locked_until and datetime.fromisoformat(str(locked_until).replace("Z", "+00:00")) > datetime.now(timezone.utc):
+        pg_rpc("driver_record_auth_attempt", {
+            "p_driver_account_id": account_id, "p_success": False,
+            "p_ip_hash": ip_hash, "p_user_agent": user_agent,
+        })
+        return RedirectResponse(url="/driver?flash=Login+temporarily+locked", status_code=303)
+    valid = valid_pin_format(pin)
+    if valid:
+        try:
+            expected = hash_pin(pin, bytes.fromhex(str(credential["pin_salt"])))
+            valid = secrets.compare_digest(expected, str(credential["pin_hash"]))
+        except ValueError:
+            valid = False
+    result = pg_rpc("driver_record_auth_attempt", {
+        "p_driver_account_id": account_id, "p_success": valid,
+        "p_ip_hash": ip_hash, "p_user_agent": user_agent,
+    })
+    if not valid or not result.get("ok"):
+        message = "Login temporarily locked" if result.get("error") == "LOCKED" else "Invalid phone or PIN"
+        return RedirectResponse(url="/driver?flash=" + quote(message, safe=""), status_code=303)
+    response = RedirectResponse(url=driver_app_url(account_id), status_code=303)
+    response.set_cookie(
+        DRIVER_SESSION_COOKIE,
+        create_driver_session(account_id, int(result["credential_version"])),
+        max_age=DRIVER_SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=DRIVER_SESSION_COOKIE_SECURE,
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
+@app.post("/driver/app/{account_id}/logout")
+def driver_app_logout(request: Request, account_id: int) -> RedirectResponse:
+    require_driver_session(request, account_id)
+    ip_hash, user_agent = request_fingerprint(request)
+    pg_rpc("driver_write_auth_event", {
+        "p_driver_account_id": account_id, "p_event_type": "LOGOUT",
+        "p_success": True, "p_ip_hash": ip_hash, "p_user_agent": user_agent,
+        "p_detail": {},
+    })
+    response = RedirectResponse(url="/driver?flash=Signed+out", status_code=303)
+    response.delete_cookie(DRIVER_SESSION_COOKIE, path="/")
+    return response
 
 
 @app.get("/driver/app/{account_id}", response_class=HTMLResponse)
-def driver_app_dashboard(account_id: int, flash: str = "") -> HTMLResponse:
+def driver_app_dashboard(request: Request, account_id: int, flash: str = "") -> HTMLResponse:
+    require_driver_session(request, account_id)
     rows = pg_get(f"/v_driver_accounts?id=eq.{account_id}&limit=1")
     if not rows:
         raise HTTPException(status_code=404, detail="Driver account not found")
@@ -602,6 +723,7 @@ def driver_app_dashboard(account_id: int, flash: str = "") -> HTMLResponse:
         <p><strong>Phone:</strong> {esc(account.get('phone'))}</p>
         <p><strong>Driver code:</strong> {esc(account.get('repartidor_codigo') or '')}</p>
         <p><strong>Last session:</strong> {esc(session.get('started_at') or 'Offline')}</p>
+        <form method="post" action="/driver/app/{account_id}/logout"><button class="ghost" type="submit">Sign out</button></form>
       </section>
     </div>
     <section class="panel">
@@ -618,38 +740,44 @@ def driver_app_dashboard(account_id: int, flash: str = "") -> HTMLResponse:
 
 @app.post("/driver/app/{account_id}/online")
 def driver_app_online(
+    request: Request,
     account_id: int,
     latitude: str = Form(""),
     longitude: str = Form(""),
 ) -> RedirectResponse:
-    result = api_driver_online(account_id, device_id="driver-web", app_version="phase3-web")
+    require_driver_session(request, account_id)
+    result = api_driver_online(request, account_id, device_id="driver-web", app_version="phase3-web")
     payload = json.loads(result.body.decode("utf-8"))
     lat = parse_optional_float(latitude)
     lon = parse_optional_float(longitude)
     if lat is not None and lon is not None:
-        api_driver_location(account_id, int(payload["session_id"]), lat, lon, 10)
+        api_driver_location(request, account_id, int(payload["session_id"]), lat, lon, 10)
     return RedirectResponse(url=driver_app_url(account_id, "Online"), status_code=303)
 
 
 @app.post("/driver/app/{account_id}/offline")
-def driver_app_offline(account_id: int) -> RedirectResponse:
-    api_driver_offline(account_id)
+def driver_app_offline(request: Request, account_id: int) -> RedirectResponse:
+    require_driver_session(request, account_id)
+    api_driver_offline(request, account_id)
     return RedirectResponse(url=driver_app_url(account_id, "Offline"), status_code=303)
 
 
 @app.post("/driver/app/{account_id}/location")
 def driver_app_location(
+    request: Request,
     account_id: int,
     session_id: int = Form(...),
     latitude: float = Form(...),
     longitude: float = Form(...),
 ) -> RedirectResponse:
-    api_driver_location(account_id, session_id, latitude, longitude, 10)
+    require_driver_session(request, account_id)
+    api_driver_location(request, account_id, session_id, latitude, longitude, 10)
     return RedirectResponse(url=driver_app_url(account_id, "Location updated"), status_code=303)
 
 
 @app.post("/driver/app/{account_id}/offers/{candidate_id}/accept")
-def driver_app_offer_accept(account_id: int, candidate_id: int) -> RedirectResponse:
+def driver_app_offer_accept(request: Request, account_id: int, candidate_id: int) -> RedirectResponse:
+    require_driver_session(request, account_id)
     result = pg_rpc("driver_accept_nearby_offer", {
         "p_driver_account_id": account_id,
         "p_candidate_id": candidate_id,
@@ -659,7 +787,8 @@ def driver_app_offer_accept(account_id: int, candidate_id: int) -> RedirectRespo
 
 
 @app.post("/driver/app/{account_id}/offers/{candidate_id}/decline")
-def driver_app_offer_decline(account_id: int, candidate_id: int) -> RedirectResponse:
+def driver_app_offer_decline(request: Request, account_id: int, candidate_id: int) -> RedirectResponse:
+    require_driver_session(request, account_id)
     result = pg_rpc("driver_decline_nearby_offer", {
         "p_driver_account_id": account_id,
         "p_candidate_id": candidate_id,
@@ -670,11 +799,13 @@ def driver_app_offer_decline(account_id: int, candidate_id: int) -> RedirectResp
 
 @app.post("/driver/app/{account_id}/assignments/{assignment_id}/action")
 def driver_app_assignment_action(
+    request: Request,
     account_id: int,
     assignment_id: int,
     action: str = Form(...),
     reason: str = Form(""),
 ) -> RedirectResponse:
+    require_driver_session(request, account_id)
     accounts = pg_get(f"/v_driver_accounts?id=eq.{account_id}&select=id,repartidor_id,repartidor_codigo&limit=1")
     if not accounts or accounts[0].get("repartidor_id") is None:
         raise HTTPException(status_code=403, detail="Driver account is not linked")
@@ -855,7 +986,13 @@ async def upload_document(
 
 
 @app.post("/api/driver/{account_id}/online")
-def api_driver_online(account_id: int, device_id: str = Form(""), app_version: str = Form("phase1")) -> JSONResponse:
+def api_driver_online(
+    request: Request,
+    account_id: int,
+    device_id: str = Form(""),
+    app_version: str = Form("phase1"),
+) -> JSONResponse:
+    require_driver_session(request, account_id)
     rows = pg_get(f"/driver_accounts?id=eq.{account_id}&status=in.(APPROVED,ACTIVE)&limit=1")
     if not rows:
         raise HTTPException(status_code=403, detail="Driver is not approved")
@@ -870,7 +1007,8 @@ def api_driver_online(account_id: int, device_id: str = Form(""), app_version: s
 
 
 @app.post("/api/driver/{account_id}/offline")
-def api_driver_offline(account_id: int) -> JSONResponse:
+def api_driver_offline(request: Request, account_id: int) -> JSONResponse:
+    require_driver_session(request, account_id)
     sessions = pg_get(
         f"/driver_online_sessions?driver_account_id=eq.{account_id}&status=eq.ONLINE&order=started_at.desc&limit=5"
     )
@@ -886,12 +1024,14 @@ def api_driver_offline(account_id: int) -> JSONResponse:
 
 @app.post("/api/driver/{account_id}/location")
 def api_driver_location(
+    request: Request,
     account_id: int,
     session_id: int = Form(...),
     latitude: float = Form(...),
     longitude: float = Form(...),
     accuracy_m: float = Form(0),
 ) -> JSONResponse:
+    require_driver_session(request, account_id)
     sessions = pg_get(
         f"/driver_online_sessions?id=eq.{session_id}&driver_account_id=eq.{account_id}&status=eq.ONLINE&limit=1"
     )
@@ -911,7 +1051,8 @@ def api_driver_location(
 
 
 @app.get("/api/driver/{account_id}/offers")
-def api_driver_offers(account_id: int) -> JSONResponse:
+def api_driver_offers(request: Request, account_id: int) -> JSONResponse:
+    require_driver_session(request, account_id)
     rows = pg_get(
         "/v_delivery_offer_candidates"
         f"?driver_account_id=eq.{account_id}"
@@ -924,7 +1065,8 @@ def api_driver_offers(account_id: int) -> JSONResponse:
 
 
 @app.post("/api/driver/{account_id}/offers/{candidate_id}/view")
-def api_driver_offer_view(account_id: int, candidate_id: int) -> JSONResponse:
+def api_driver_offer_view(request: Request, account_id: int, candidate_id: int) -> JSONResponse:
+    require_driver_session(request, account_id)
     rows = pg_get(
         f"/delivery_offer_candidates?id=eq.{candidate_id}&driver_account_id=eq.{account_id}&status=eq.OFFERED&limit=1"
     )
@@ -934,7 +1076,8 @@ def api_driver_offer_view(account_id: int, candidate_id: int) -> JSONResponse:
 
 
 @app.post("/api/driver/{account_id}/offers/{candidate_id}/accept")
-def api_driver_offer_accept(account_id: int, candidate_id: int) -> JSONResponse:
+def api_driver_offer_accept(request: Request, account_id: int, candidate_id: int) -> JSONResponse:
+    require_driver_session(request, account_id)
     result = pg_rpc("driver_accept_nearby_offer", {
         "p_driver_account_id": account_id,
         "p_candidate_id": candidate_id,
@@ -943,7 +1086,8 @@ def api_driver_offer_accept(account_id: int, candidate_id: int) -> JSONResponse:
 
 
 @app.post("/api/driver/{account_id}/offers/{candidate_id}/decline")
-def api_driver_offer_decline(account_id: int, candidate_id: int) -> JSONResponse:
+def api_driver_offer_decline(request: Request, account_id: int, candidate_id: int) -> JSONResponse:
+    require_driver_session(request, account_id)
     result = pg_rpc("driver_decline_nearby_offer", {
         "p_driver_account_id": account_id,
         "p_candidate_id": candidate_id,
@@ -1216,6 +1360,11 @@ def ops_driver_detail(
     docs = pg_get(f"/driver_documents?driver_account_id=eq.{account_id}&order=created_at.desc")
     checks = pg_get(f"/driver_verification_checks?driver_account_id=eq.{account_id}&order=created_at.desc")
     vehicles = pg_get(f"/driver_vehicles?driver_account_id=eq.{account_id}&order=created_at.desc")
+    auth_rows = pg_get(
+        f"/driver_auth_credentials?driver_account_id=eq.{account_id}"
+        "&select=credential_version,failed_attempts,locked_until,pin_changed_at,last_login_at&limit=1"
+    )
+    auth = auth_rows[0] if auth_rows else {}
     doc_rows = "".join(
         f"<tr><td>{esc(d.get('document_type'))}</td><td>{badge(d.get('status'))}</td><td class='code'>{esc(d.get('storage_key'))}</td><td>{esc(d.get('byte_size'))}</td></tr>"
         for d in docs
@@ -1273,12 +1422,74 @@ def ops_driver_detail(
           <button type="submit">Save vehicle</button>
         </form>
       </section>
+      <section class="panel">
+        <h2>Driver access</h2>
+        <p><strong>PIN:</strong> {"Configured" if auth else "Not configured"}</p>
+        <p><strong>Last login:</strong> {esc(auth.get('last_login_at') or 'Never')}</p>
+        <p><strong>Failed attempts:</strong> {esc(auth.get('failed_attempts') or 0)}</p>
+        <p><strong>Locked until:</strong> {esc(auth.get('locked_until') or 'Not locked')}</p>
+        <form method="post" action="{with_token('/ops/drivers/' + str(account_id) + '/pin', request)}">
+          <label>New personal PIN
+            <input name="pin" type="password" inputmode="numeric" minlength="6" maxlength="12" autocomplete="new-password" required>
+          </label>
+          <label>Confirm PIN
+            <input name="pin_confirm" type="password" inputmode="numeric" minlength="6" maxlength="12" autocomplete="new-password" required>
+          </label>
+          <button type="submit">Set PIN and revoke sessions</button>
+        </form>
+      </section>
     </div>
     <section class="panel"><h2>Documents</h2><table><thead><tr><th>Type</th><th>Status</th><th>Storage</th><th>Bytes</th></tr></thead><tbody>{doc_rows}</tbody></table></section>
     <section class="panel"><h2>Verification checks</h2><table><thead><tr><th>Type</th><th>Provider</th><th>Status</th><th>Reason</th></tr></thead><tbody>{check_rows}</tbody></table></section>
     <section class="panel"><h2>Vehicles</h2><table><thead><tr><th>Type</th><th>Plate</th><th>Status</th><th>Insurance expires</th></tr></thead><tbody>{vehicle_rows}</tbody></table></section>
     """
     return layout("Driver Review", body, auth_query=token_query(request))
+
+
+@app.post("/ops/drivers/{account_id}/pin")
+def ops_driver_pin(
+    account_id: int,
+    request: Request,
+    pin: str = Form(...),
+    pin_confirm: str = Form(...),
+    x_admin_token: Optional[str] = Header(default=None),
+) -> RedirectResponse:
+    check_admin_auth(request, x_admin_token)
+    if pin != pin_confirm:
+        raise HTTPException(status_code=400, detail="PIN confirmation does not match")
+    if not valid_pin_format(pin):
+        raise HTTPException(status_code=400, detail="PIN must contain 6 to 12 digits")
+    accounts = pg_get(f"/driver_accounts?id=eq.{account_id}&select=id&limit=1")
+    if not accounts:
+        raise HTTPException(status_code=404, detail="Driver account not found")
+    salt = secrets.token_bytes(16)
+    existing = pg_get(
+        f"/driver_auth_credentials?driver_account_id=eq.{account_id}"
+        "&select=credential_version&limit=1"
+    )
+    payload = {
+        "pin_salt": salt.hex(),
+        "pin_hash": hash_pin(pin, salt),
+        "credential_version": int(existing[0]["credential_version"]) + 1 if existing else 1,
+        "failed_attempts": 0,
+        "locked_until": None,
+        "pin_changed_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+    }
+    if existing:
+        pg_patch(f"/driver_auth_credentials?driver_account_id=eq.{account_id}", payload)
+    else:
+        pg_post("/driver_auth_credentials", {"driver_account_id": account_id, **payload})
+    ip_hash, user_agent = request_fingerprint(request)
+    pg_rpc("driver_write_auth_event", {
+        "p_driver_account_id": account_id, "p_event_type": "PIN_SET",
+        "p_success": True, "p_ip_hash": ip_hash, "p_user_agent": user_agent,
+        "p_detail": {"credential_version": payload["credential_version"]},
+    })
+    return RedirectResponse(
+        url=with_token(f"/ops/drivers/{account_id}?flash=PIN+updated+and+sessions+revoked", request),
+        status_code=303,
+    )
 
 
 @app.post("/ops/drivers/{account_id}/vehicle")

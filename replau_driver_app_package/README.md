@@ -124,13 +124,46 @@ http://127.0.0.1:8797/driver/app/{driver_account_id}
 
 Drivers can:
 
-- open the app by phone number
+- sign in with their phone number and individual 6-12 digit PIN
 - see approval and online/offline status
 - go online with optional starting coordinates
 - update current location while online
 - see open nearby offers
 - accept or decline an offer
 - see active assignment status
+
+## Individual driver authentication
+
+Apply the authentication migration and rollback-only contract test:
+
+```bash
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d localapi \
+  -f add_driver_app_auth.sql \
+  -f test_driver_app_auth.sql
+```
+
+Configure a random session-signing secret in the installed `driver.env`:
+
+```text
+DRIVER_SESSION_SECRET=<random value of at least 32 bytes>
+DRIVER_SESSION_TTL_SECONDS=28800
+DRIVER_SESSION_COOKIE_SECURE=false
+```
+
+Set `DRIVER_SESSION_COOKIE_SECURE=true` when the driver route is served only
+through HTTPS. Restart the service after applying the migration and setting the
+secret.
+
+Dispatch sets or resets a driver's PIN from **Driver Ops → Review → Driver
+access**. Resetting a PIN increments its credential version and immediately
+revokes existing sessions. Login failures are counted transactionally, with a
+15-minute lock after five failures and a 24-hour lock after ten. PIN changes,
+successful/failed logins, locks, and logout are recorded in the append-only
+`api.driver_auth_events` audit table.
+
+The shared HTTP Basic credential remains an outer edge control. The individual
+PIN/session is a second layer and is required for driver dashboards and driver
+APIs.
 
 ## Dispatch smoke test
 

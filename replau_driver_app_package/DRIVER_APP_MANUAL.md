@@ -31,7 +31,9 @@ Go to:
 http://localhost/driver
 ```
 
-Use the **Driver app** form and enter the driver's phone number.
+Use the **Driver app** form and enter the driver's phone number and personal
+6-12 digit PIN. Dispatch creates or resets this PIN from the driver's review
+page. A reset signs out all existing sessions.
 
 Current test driver:
 
@@ -44,6 +46,10 @@ This opens:
 ```text
 /driver/app/{driver_account_id}
 ```
+
+The app uses an HTTP-only signed session that expires after the configured
+session lifetime (eight hours by default). Use **Sign out** from the Profile
+panel when finishing a shift.
 
 For the current test driver:
 
