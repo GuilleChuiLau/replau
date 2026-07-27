@@ -43,6 +43,11 @@ append-only; database triggers reject changes or deletion of OCR snapshots and
 review events. Opening a proof reuses the snapshot for the same file/cache
 version, while **Actualizar análisis OCR** creates a new version.
 
+`PAYMENT_RECEIPT_DIR` remains the only current upload root. Historical proofs
+can be read from comma-separated `PAYMENT_RECEIPT_LEGACY_DIRS`; its default is
+the original Replau receipt directory. Every resolved file must remain inside
+one of these explicit roots.
+
 OCR is advisory only. It must not automatically approve a payment because a
 screenshot can be edited or reused and does not prove settlement. Keep manual
 review enabled unless the transaction is reconciled with an authoritative bank

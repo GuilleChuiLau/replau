@@ -21,6 +21,14 @@ REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "10"))
 REQUIRE_REVIEW_TOKEN = os.environ.get("REQUIRE_REVIEW_TOKEN", "false").lower() == "true"
 REVIEW_TOKEN = os.environ.get("REVIEW_TOKEN", "").strip()
 PAYMENT_RECEIPT_DIR = Path(os.environ.get("PAYMENT_RECEIPT_DIR", "/home/guill/.openclaw/workspace/replau_payment_receipts")).resolve()
+PAYMENT_RECEIPT_LEGACY_DIRS = tuple(
+    Path(value.strip()).expanduser().resolve()
+    for value in os.environ.get(
+        "PAYMENT_RECEIPT_LEGACY_DIRS",
+        "/home/guill/.openclaw/workspace/replau_payment_receipts",
+    ).split(",")
+    if value.strip()
+)
 
 app = FastAPI(title="Replau Payment Proof Review", version="1.0.0")
 ocr = PaymentProofOCR()
@@ -248,9 +256,8 @@ def local_proof_path(row: Dict[str, Any]) -> Path:
     if not raw_path:
         raise HTTPException(status_code=404, detail="Proof has no saved local file")
     path = Path(raw_path).expanduser().resolve()
-    try:
-        path.relative_to(PAYMENT_RECEIPT_DIR)
-    except ValueError:
+    allowed_roots = (PAYMENT_RECEIPT_DIR, *PAYMENT_RECEIPT_LEGACY_DIRS)
+    if not any(path == root or root in path.parents for root in allowed_roots):
         raise HTTPException(status_code=403, detail="Proof file path is outside the receipt directory")
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Saved proof file not found")

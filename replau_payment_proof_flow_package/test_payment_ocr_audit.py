@@ -69,6 +69,8 @@ class PaymentOcrAuditTests(unittest.TestCase):
             '"p_ocr_analysis_id": ocr_analysis_id',
             "Decisión deshabilitada hasta que exista un snapshot OCR persistido.",
             "Historial OCR inmutable",
+            "PAYMENT_RECEIPT_LEGACY_DIRS",
+            "allowed_roots = (PAYMENT_RECEIPT_DIR, *PAYMENT_RECEIPT_LEGACY_DIRS)",
         ):
             self.assertIn(marker, APP)
 
