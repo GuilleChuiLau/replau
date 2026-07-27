@@ -542,6 +542,9 @@ def collect():
     kitchen=pg("/v_kitchen_orders?select=id,pedido_num,cliente_nombre,kitchen_status,queue_minutes,queue_color,total&order=id.asc&limit=10")
     pending=pg("/v_whatsapp_outbox?status=eq.PENDING&select=id,pedido_num,event_type,status,attempts,last_attempt_at,created_at,error_message&order=id.desc&limit=50")
     errors=pg("/v_whatsapp_outbox?status=eq.ERROR&select=id,pedido_num,event_type,status,attempts,last_attempt_at,created_at,error_message&order=id.desc&limit=50")
+    policy_rows=pg("/whatsapp_outbound_policy?select=state,state_reason,hourly_limit,daily_limit,recipient_hourly_limit,session_hours,failure_trip_threshold,consecutive_failures,tripped_at,updated_at,updated_by&limit=1")
+    policy_events=pg("/whatsapp_policy_events?select=decision,reason,created_at&order=id.desc&limit=50")
+    opted_out=pg("/whatsapp_contact_policy?consent_status=eq.OPTED_OUT&select=consent_status&limit=1000")
     emails=pg("/email_logistica_log?status=eq.PENDING&select=id,pedido_id,recipient,status,created_at,error_message&order=id.desc&limit=50")
     stuck=[r for r in pending["data"] if int(r.get("attempts") or 0)>=OUTBOX_MAX_ATTEMPTS] if pending["ok"] else []
     crit=[]; warn=[]
@@ -553,6 +556,10 @@ def collect():
         if not u["ok"]: crit.append(f"URL failed: {n} {u.get('url')}")
     if stuck: crit.append(f"Stuck WhatsApp outbox rows: {len(stuck)}")
     if errors["data"]: crit.append(f"ERROR WhatsApp outbox rows: {len(errors['data'])}")
+    policy=(policy_rows["data"] or [{}])[0] if policy_rows["ok"] else {"state":"UNAVAILABLE","state_reason":policy_rows.get("error")}
+    policy["opted_out_count"]=len(opted_out["data"]) if opted_out["ok"] else None
+    policy["recent_decision_counts"]=dict(Counter(str(row.get("decision") or "UNKNOWN") for row in policy_events["data"])) if policy_events["ok"] else {}
+    if policy.get("state")=="TRIPPED": crit.append(f"WhatsApp outbound circuit tripped: {policy.get('state_reason')}")
     if pending["data"]: warn.append(f"Pending WhatsApp notifications: {len(pending['data'])}")
     email_delivery={"enabled":EMAIL_NOTIFICATIONS_ENABLED,"pending_count":len(emails["data"]),"status":"enabled" if EMAIL_NOTIFICATIONS_ENABLED else "disabled"}
     if EMAIL_NOTIFICATIONS_ENABLED and emails["data"]: warn.append(f"Pending logistics emails: {len(emails['data'])}")
@@ -570,7 +577,7 @@ def collect():
     if not rs.get("accepting_orders"):
         warn.append("Restaurant ordering is paused")
         overall="CRITICAL" if crit else "WARN"
-    return {"ok":overall=="OK","overall":overall,"checked_at":now(),"critical":crit,"warnings":warn,"services":services,"ports":ports,"urls":urls,"latest_orders":orders,"kitchen":kitchen,"pending_outbox":pending,"error_outbox":errors,"pending_emails":emails,"email_delivery":email_delivery,"stuck_outbox":stuck,"latest_backup":b,"whatsapp_watchdog":w,"restaurant_status":rs,"products":product_summary(),"payment_proofs":recent_payment_proofs(),"payment_proof_queue":payment_proof_queue()}
+    return {"ok":overall=="OK","overall":overall,"checked_at":now(),"critical":crit,"warnings":warn,"services":services,"ports":ports,"urls":urls,"latest_orders":orders,"kitchen":kitchen,"pending_outbox":pending,"error_outbox":errors,"whatsapp_policy":policy,"pending_emails":emails,"email_delivery":email_delivery,"stuck_outbox":stuck,"latest_backup":b,"whatsapp_watchdog":w,"restaurant_status":rs,"products":product_summary(),"payment_proofs":recent_payment_proofs(),"payment_proof_queue":payment_proof_queue()}
 @app.get("/health")
 def health(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
     auth(req,x_ops_token); return collect()
@@ -826,6 +833,7 @@ def dash(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-
 <div class="card"><h2>Manager Command Console</h2><div class="grid3"><div><h3>Ordering</h3><p>{status_badge}</p><p class="muted">Last update: {esc(rs.get("updated_at") or "not set")} by {esc(rs.get("updated_by"))}</p><form method="post" action="/api/restaurant-status{token_query(req)}"><label>Order intake</label><select name="accepting_orders"><option value="true" {"selected" if rs.get("accepting_orders") else ""}>Accept orders</option><option value="false" {"selected" if not rs.get("accepting_orders") else ""}>Pause orders</option></select><label>Internal reason</label><input name="reason" value="{esc(rs.get("reason"))}" placeholder="Closed, sold out, maintenance"><label>Customer message while paused</label><textarea name="customer_message">{esc(rs.get("customer_message"))}</textarea><br><br><button type="submit">Save ordering status</button></form></div><div><h3>Catalog</h3><p><strong>{esc(prod.get("active"))}</strong> active products<br><strong>{esc(prod.get("inactive"))}</strong> inactive products</p><p class="muted">Use Product Admin for availability, recipe costs, and low-stock alerts.</p><a class="btn" href="{esc(product_admin_url("costs"))}" target="_blank">Open Low Stock / Costs</a> <a class="btn secondary" href="{esc(product_admin_url())}" target="_blank">Open Product Admin</a></div><div><h3>Review Queues</h3><p>Payment proofs, failed WhatsApp outbox, pending emails, and kitchen state are below.</p><a class="btn" href="{esc(payment_proof_review_url())}" target="_blank">Open Payment Proofs</a> <a class="btn secondary" href="http://127.0.0.1:8790/dashboard" target="_blank">Open Logistics</a></div></div></div>
 <div class="grid"><div class="card"><h2>Critical</h2><ul>{ul(h["critical"])}</ul></div><div class="card"><h2>Warnings</h2><ul>{ul(h["warnings"])}</ul></div></div>
 <div class="card"><h2>WhatsApp Gateway</h2>{tbl(whatsapp_rows,["status","connected","gateway_health_ok","gateway_service_active","checked_at","last_connected_at","last_disconnect_at","seconds_since_disconnect","last_recovery_seconds","disconnects_1h","disconnects_24h","last_restart_at","last_restart_reason"])}</div>
+<div class="card"><h2>WhatsApp Outbound Safety Policy</h2>{tbl([h["whatsapp_policy"]],["state","state_reason","hourly_limit","daily_limit","recipient_hourly_limit","session_hours","failure_trip_threshold","consecutive_failures","opted_out_count","recent_decision_counts","tripped_at","updated_at","updated_by"])}</div>
 <div class="card"><h2>Latest backup</h2><p>{backup_html}</p></div>
 <div class="card"><h2>Services</h2>{tbl(service_rows,["service","active","enabled"])}</div>
 <div class="grid"><div class="card"><h2>Ports</h2>{tbl(port_rows,["name","ok","host","port","error"])}</div><div class="card"><h2>URLs</h2>{tbl(url_rows,["name","ok","status","ms","url","error"])}</div></div>
