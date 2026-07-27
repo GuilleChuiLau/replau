@@ -388,6 +388,23 @@ def log_whatsapp_message(
     )
 
 
+def record_whatsapp_policy_inbound(identity: IdentityLike, message_text: Optional[str]) -> None:
+    """Refresh the service window and enforce explicit opt-in/opt-out keywords."""
+    scoped = scoped_identity(identity)
+    try:
+        pg_post(
+            "/rpc/record_whatsapp_policy_inbound",
+            {
+                "p_whatsapp_number": scoped.customer_address,
+                "p_message_text": message_text,
+            },
+        )
+    except Exception as exc:
+        # Ordering remains available if the policy audit layer is temporarily
+        # unavailable; outbound delivery fails closed in the worker.
+        logging.warning("Could not update WhatsApp policy inbound state: %s", exc)
+
+
 def register_conversation_request(inbound: NormalizedWebhook, identity: ConversationIdentity) -> Optional[Dict[str, Any]]:
     """Record a user-initiated direct chat without making ordering depend on the staff queue."""
     raw = inbound.raw_payload or {}
@@ -3269,6 +3286,7 @@ def _route_message_scoped(inbound: NormalizedWebhook) -> Dict[str, Any]:
         inbound.longitude,
         inbound.raw_payload,
     )
+    record_whatsapp_policy_inbound(identity, inbound.message_text)
     conversation = get_conversation(identity)
     state = (conversation or {}).get("estado") or "NEW"
     logging.info(

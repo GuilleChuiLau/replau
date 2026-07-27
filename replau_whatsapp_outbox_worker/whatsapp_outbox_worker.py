@@ -5,8 +5,9 @@ import os
 import time
 import logging
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
+from urllib.parse import quote
 
 import requests
 
@@ -21,6 +22,14 @@ POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
 BATCH_LIMIT = int(os.environ.get("BATCH_LIMIT", "10"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "30"))
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "5"))
+POLICY_DENY_RETRY_SECONDS = int(os.environ.get("POLICY_DENY_RETRY_SECONDS", "900"))
+DRY_RUN_RECHECK_SECONDS = int(os.environ.get("DRY_RUN_RECHECK_SECONDS", "300"))
+COALESCIBLE_EVENTS = {
+    "DELIVERY_ASSIGNED",
+    "DELIVERY_PICKED_UP",
+    "DELIVERY_EN_ROUTE",
+    "DELIVERY_ARRIVED",
+}
 
 # Start dry-run true. It prints messages and leaves them PENDING.
 WHATSAPP_DRY_RUN = os.environ.get("WHATSAPP_DRY_RUN", "true").lower() == "true"
@@ -65,11 +74,13 @@ def postgrest_request(method: str, path_or_url: str, **kwargs: Any) -> requests.
 
 
 def get_pending() -> List[Dict[str, Any]]:
+    now = quote(utc_now_iso(), safe=":-TZ")
     url = (
         pg_url("/whatsapp_outbox")
         + "?status=eq.PENDING"
         + f"&attempts=lt.{MAX_ATTEMPTS}"
-        + "&select=id,pedido_id,whatsapp_number,message_text,event_type,attempts,created_at"
+        + f"&or=(not_before.is.null,not_before.lte.{now})"
+        + "&select=id,pedido_id,whatsapp_number,message_text,event_type,attempts,created_at,not_before,policy_decision"
         + "&order=created_at.asc"
         + f"&limit={BATCH_LIMIT}"
     )
@@ -87,13 +98,58 @@ def patch_outbox(outbox_id: int, payload: Dict[str, Any]) -> Any:
     return response.json()
 
 
+def pg_rpc(name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    response = postgrest_request(
+        "POST",
+        f"/rpc/{name}",
+        headers={"Content-Type": "application/json"},
+        json=payload,
+    )
+    return response.json()
+
+
+def later_iso(seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=max(0, seconds))).isoformat().replace("+00:00", "Z")
+
+
+def evaluate_policy(row: Dict[str, Any], record: bool = True) -> Dict[str, Any]:
+    return pg_rpc(
+        "evaluate_whatsapp_outbound_policy",
+        {"p_outbox_id": row["id"], "p_record": record},
+    )
+
+
+def coalesce_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    groups: Dict[tuple[Any, str], List[Dict[str, Any]]] = {}
+    retained: List[Dict[str, Any]] = []
+    for row in rows:
+        if row.get("event_type") not in COALESCIBLE_EVENTS:
+            retained.append(row)
+            continue
+        key = (row.get("pedido_id"), "".join(ch for ch in str(row.get("whatsapp_number") or "") if ch.isdigit()))
+        groups.setdefault(key, []).append(row)
+    for group in groups.values():
+        group.sort(key=lambda row: (str(row.get("created_at") or ""), int(row["id"])))
+        newest = group[-1]
+        retained.append(newest)
+        for older in group[:-1]:
+            pg_rpc(
+                "record_whatsapp_coalesced",
+                {
+                    "p_cancelled_outbox_id": older["id"],
+                    "p_retained_outbox_id": newest["id"],
+                },
+            )
+            logging.info("Coalesced WhatsApp outbox id=%s into id=%s", older["id"], newest["id"])
+    return sorted(retained, key=lambda row: (str(row.get("created_at") or ""), int(row["id"])))
+
+
 def send_whatsapp(row: Dict[str, Any]) -> Dict[str, Any]:
     if WHATSAPP_DRY_RUN:
-        logging.info("========== DRY RUN WHATSAPP ==========")
-        logging.info("To: %s", row["whatsapp_number"])
-        logging.info("Event: %s", row["event_type"])
-        logging.info("Message:\n%s", row["message_text"])
-        logging.info("======================================")
+        logging.info(
+            "DRY RUN WhatsApp outbox id=%s event=%s message_length=%s",
+            row["id"], row["event_type"], len(str(row.get("message_text") or "")),
+        )
         return {"ok": True, "dry_run": True}
 
     if not OPENCLAW_SEND_URL:
@@ -128,9 +184,44 @@ def process_one(row: Dict[str, Any]) -> None:
     outbox_id = row["id"]
     attempts = int(row.get("attempts") or 0)
 
-    logging.info("Processing whatsapp_outbox id=%s to=%s", outbox_id, row["whatsapp_number"])
+    logging.info("Processing WhatsApp outbox id=%s event=%s", outbox_id, row["event_type"])
 
     try:
+        policy = evaluate_policy(row, record=not WHATSAPP_DRY_RUN)
+        if not policy.get("allowed"):
+            decision = str(policy.get("decision") or "PAUSED")
+            retry_after = int(policy.get("retry_after_seconds") or POLICY_DENY_RETRY_SECONDS)
+            payload: Dict[str, Any] = {
+                "policy_decision": decision,
+                "policy_reason": str(policy.get("reason") or "Policy denied delivery")[:500],
+                "policy_evaluated_at": utc_now_iso(),
+            }
+            if decision == "OPTED_OUT":
+                payload["status"] = "CANCELLED"
+                payload["error_message"] = "Cancelled by recipient opt-out policy"
+            else:
+                payload["status"] = "PENDING"
+                payload["not_before"] = later_iso(retry_after)
+            patch_outbox(outbox_id, payload)
+            logging.warning("WhatsApp outbox id=%s held by policy decision=%s", outbox_id, decision)
+            return
+
+        if WHATSAPP_DRY_RUN:
+            result = send_whatsapp(row)
+            patch_outbox(
+                outbox_id,
+                {
+                    "status": "PENDING",
+                    "not_before": later_iso(DRY_RUN_RECHECK_SECONDS),
+                    "policy_decision": "DRY_RUN",
+                    "policy_reason": "Policy allowed; live delivery disabled",
+                    "policy_evaluated_at": utc_now_iso(),
+                    "raw_response": result,
+                    "error_message": None,
+                },
+            )
+            return
+
         patch_outbox(
             outbox_id,
             {
@@ -143,18 +234,6 @@ def process_one(row: Dict[str, Any]) -> None:
 
         result = send_whatsapp(row)
 
-        if WHATSAPP_DRY_RUN:
-            # Leave as pending for safe testing.
-            patch_outbox(
-                outbox_id,
-                {
-                    "status": "PENDING",
-                    "raw_response": result,
-                    "error_message": None,
-                },
-            )
-            return
-
         patch_outbox(
             outbox_id,
             {
@@ -164,6 +243,12 @@ def process_one(row: Dict[str, Any]) -> None:
                 "error_message": None,
             },
         )
+        try:
+            pg_rpc("record_whatsapp_delivery_result", {"p_outbox_id": outbox_id, "p_succeeded": True, "p_error": None})
+        except Exception:
+            # Delivery is already committed as SENT. Never retry a delivered
+            # message merely because policy telemetry failed afterward.
+            logging.exception("Could not record WhatsApp delivery success in policy telemetry")
 
         logging.info("SENT whatsapp_outbox id=%s", outbox_id)
 
@@ -175,6 +260,13 @@ def process_one(row: Dict[str, Any]) -> None:
         new_status = "ERROR" if attempts + 1 >= MAX_ATTEMPTS else "PENDING"
 
         try:
+            try:
+                pg_rpc(
+                    "record_whatsapp_delivery_result",
+                    {"p_outbox_id": outbox_id, "p_succeeded": False, "p_error": error_text[:500]},
+                )
+            except Exception:
+                logging.exception("Could not record WhatsApp delivery failure in policy circuit")
             patch_outbox(
                 outbox_id,
                 {
@@ -196,7 +288,7 @@ def run_once() -> None:
 
     logging.info("Found %s pending WhatsApp notification(s).", len(rows))
 
-    for row in rows:
+    for row in coalesce_rows(rows):
         process_one(row)
 
 
