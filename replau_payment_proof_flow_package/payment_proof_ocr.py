@@ -344,10 +344,10 @@ class PaymentProofOCR:
         average = sum(confidences) / len(confidences) if confidences else 0.0
         return lines, confidences, average, used_passes
 
-    def analyze(self, path: Path, order_total: Any = None) -> dict[str, Any]:
+    def analyze(self, path: Path, order_total: Any = None, force: bool = False) -> dict[str, Any]:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         cache_file = self.cache_dir / f"{digest}.json"
-        if cache_file.is_file():
+        if cache_file.is_file() and not force:
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
             if cached.get("cache_version") == CACHE_VERSION:
                 return self._score(cached, order_total, digest)

@@ -365,6 +365,70 @@ def render_ocr_result(result: Dict[str, Any], order_total: Any) -> str:
     """
 
 
+def ocr_audit_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the immutable audit snapshot useful without storing raw OCR lines."""
+    return {
+        key: result.get(key)
+        for key in (
+            "sha256",
+            "perceptual_hash",
+            "cache_version",
+            "engine",
+            "ocr_passes",
+            "ocr_confidence",
+            "fields",
+            "field_confidence",
+            "checks",
+            "review_reasons",
+            "recommendation",
+            "advisory_only",
+            "analyzed_at",
+        )
+    }
+
+
+def persist_ocr_analysis(proof_id: int, result: Dict[str, Any], force_new: bool = False) -> Dict[str, Any]:
+    return pg_rpc(
+        "record_payment_proof_ocr_analysis",
+        {
+            "p_proof_id": proof_id,
+            "p_analysis": ocr_audit_payload(result),
+            "p_force_new": force_new,
+        },
+    )
+
+
+def ocr_audit_history(proof_id: int) -> list[Dict[str, Any]]:
+    return pg_get(
+        f"/v_payment_proof_ocr_analyses?proof_id=eq.{proof_id}"
+        "&select=id,analysis_version,engine,ocr_confidence,recommendation,advisory_only,analyzed_at,created_at,used_for_decision"
+        "&order=analysis_version.desc&limit=25"
+    )
+
+
+def render_ocr_audit_history(rows: list[Dict[str, Any]]) -> str:
+    if not rows:
+        return '<p class="muted">No hay snapshots OCR persistidos.</p>'
+    body = "".join(
+        f"""
+        <tr>
+          <td>#{esc(row.get('id'))} · v{esc(row.get('analysis_version'))}</td>
+          <td>{esc(row.get('analyzed_at'))}</td>
+          <td>{float(row.get('ocr_confidence') or 0) * 100:.1f}%</td>
+          <td>{esc(row.get('recommendation'))}</td>
+          <td>{'Sí' if row.get('used_for_decision') else 'No'}</td>
+        </tr>
+        """
+        for row in rows
+    )
+    return f"""
+      <table>
+        <thead><tr><th>Snapshot</th><th>Analizado</th><th>Confianza</th><th>Recomendación</th><th>Usado en decisión</th></tr></thead>
+        <tbody>{body}</tbody>
+      </table>
+    """
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     try:
@@ -488,12 +552,50 @@ def proof_detail(proof_id: int, request: Request, flash: str = "", x_review_toke
         raise HTTPException(status_code=404, detail="Proof not found")
     r = rows[0]
     ocr_html = '<div class="warning">No hay un archivo local disponible para analizar.</div>'
+    ocr_analysis_id: Optional[int] = None
+    ocr_analysis_version: Optional[int] = None
+    audit_error = ""
     if r.get("local_path"):
         try:
-            result = ocr.analyze(local_proof_path(r), r.get("total"))
+            force_ocr = request.query_params.get("ocr") == "1"
+            result = ocr.analyze(local_proof_path(r), r.get("total"), force=force_ocr)
             ocr_html = render_ocr_result(result, r.get("total"))
+            snapshot = persist_ocr_analysis(
+                proof_id,
+                result,
+                force_new=force_ocr,
+            )
+            ocr_analysis_id = int(snapshot["analysis_id"])
+            ocr_analysis_version = int(snapshot["analysis_version"])
         except Exception as exc:
             ocr_html = f'<div class="warning">OCR failed: {esc(type(exc).__name__)}: {esc(exc)}</div>'
+            audit_error = "No se pudo guardar el snapshot OCR. La decisión queda bloqueada para proteger la auditoría."
+    try:
+        audit_history = ocr_audit_history(proof_id)
+    except Exception:
+        audit_history = []
+    snapshot_status = (
+        f'<div class="flash">Snapshot OCR #{esc(ocr_analysis_id)} · versión {esc(ocr_analysis_version)} listo para vincular a la decisión.</div>'
+        if ocr_analysis_id is not None
+        else f'<div class="warning">{esc(audit_error or "No hay snapshot OCR disponible; la decisión está bloqueada.")}</div>'
+    )
+    decision_form = ""
+    if ocr_analysis_id is not None:
+        decision_form = f"""
+      <form method="post" action="/proof/{proof_id}/review{token_query(request)}">
+        <input type="hidden" name="ocr_analysis_id" value="{esc(ocr_analysis_id)}">
+        <label>Reviewed by</label>
+        <input name="verified_by" value="logistica">
+        <label>Notes</label>
+        <textarea name="notes" placeholder="Optional note. For rejection, this is sent to the customer."></textarea>
+        <label>Notify customer by WhatsApp?</label>
+        <select name="notify"><option value="true">Yes</option><option value="false">No</option></select>
+        <br><br>
+        <button class="good" name="status" value="VERIFIED" type="submit" onclick="return confirm('¿Aprobar este pago después de revisar el comprobante y el snapshot OCR vinculado?')">Aprobar pago</button>
+        <button class="bad" name="status" value="REJECTED" type="submit" onclick="return confirm('¿Rechazar este comprobante usando el snapshot OCR mostrado?')">Rechazar comprobante</button>
+        <button class="secondary" name="status" value="CANCELLED" type="submit">Cancel proof</button>
+      </form>
+        """
     body = f"""
     <div class="grid">
       <div class="card">
@@ -516,23 +618,17 @@ def proof_detail(proof_id: int, request: Request, flash: str = "", x_review_toke
     </div>
     <div class="card">
       <h2>Resultados del análisis OCR</h2>
+      {snapshot_status}
       {ocr_html}
       <div class="quick-actions"><a href="{esc(with_token(f'/proof/{proof_id}?ocr=1', request))}">Actualizar análisis OCR</a></div>
     </div>
     <div class="card">
+      <h2>Historial OCR inmutable</h2>
+      {render_ocr_audit_history(audit_history)}
+    </div>
+    <div class="card">
       <h2>Decisión del cajero</h2>
-      <form method="post" action="/proof/{proof_id}/review{token_query(request)}">
-        <label>Reviewed by</label>
-        <input name="verified_by" value="logistica">
-        <label>Notes</label>
-        <textarea name="notes" placeholder="Optional note. For rejection, this is sent to the customer."></textarea>
-        <label>Notify customer by WhatsApp?</label>
-        <select name="notify"><option value="true">Yes</option><option value="false">No</option></select>
-        <br><br>
-        <button class="good" name="status" value="VERIFIED" type="submit" onclick="return confirm('¿Aprobar este pago después de revisar el comprobante y los resultados OCR?')">Aprobar pago</button>
-        <button class="bad" name="status" value="REJECTED" type="submit" onclick="return confirm('¿Rechazar este comprobante?')">Rechazar comprobante</button>
-        <button class="secondary" name="status" value="CANCELLED" type="submit">Cancel proof</button>
-      </form>
+      {decision_form or '<p class="warning">Decisión deshabilitada hasta que exista un snapshot OCR persistido.</p>'}
     </div>
     <p><a href="/{token_query(request)}">Back</a></p>
     """
@@ -540,10 +636,11 @@ def proof_detail(proof_id: int, request: Request, flash: str = "", x_review_toke
 
 
 @app.post("/proof/{proof_id}/review")
-def review_proof(proof_id: int, request: Request, status: str = Form(...), verified_by: str = Form("logistica"), notes: str = Form(""), notify: str = Form("true"), x_review_token: Optional[str] = Header(default=None, alias="X-Review-Token")) -> RedirectResponse:
+def review_proof(proof_id: int, request: Request, ocr_analysis_id: int = Form(...), status: str = Form(...), verified_by: str = Form("logistica"), notes: str = Form(""), notify: str = Form("true"), x_review_token: Optional[str] = Header(default=None, alias="X-Review-Token")) -> RedirectResponse:
     check_auth(request, x_review_token)
-    pg_rpc("revisar_comprobante_pago", {
+    pg_rpc("revisar_comprobante_pago_auditado", {
         "p_proof_id": proof_id,
+        "p_ocr_analysis_id": ocr_analysis_id,
         "p_status": status,
         "p_verified_by": verified_by,
         "p_notes": notes,

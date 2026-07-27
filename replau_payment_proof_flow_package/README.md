@@ -30,6 +30,19 @@ Proofs older than `PAYMENT_RECEIPT_MAX_AGE_HOURS` (default `72`) or more than
 high-severity review reasons. These checks remain advisory and never approve or
 reject a payment automatically.
 
+## Immutable OCR decision audit
+
+Apply `add_payment_ocr_audit.sql` to store versioned OCR snapshots in
+PostgreSQL. Snapshots contain hashes, extracted fields, per-field confidence,
+checks, reason codes, and the advisory recommendation, but deliberately exclude
+raw OCR lines and field evidence to minimize duplicated personal data.
+
+Cashier decisions use `revisar_comprobante_pago_auditado` and must reference a
+snapshot belonging to the same proof. The decision and snapshot link is
+append-only; database triggers reject changes or deletion of OCR snapshots and
+review events. Opening a proof reuses the snapshot for the same file/cache
+version, while **Actualizar análisis OCR** creates a new version.
+
 OCR is advisory only. It must not automatically approve a payment because a
 screenshot can be edited or reused and does not prove settlement. Keep manual
 review enabled unless the transaction is reconciled with an authoritative bank
