@@ -14,6 +14,8 @@ class WhatsAppPolicyVisibilityTests(unittest.TestCase):
             'policy["opted_out_count"]',
             'policy["recent_decision_counts"]',
             '"whatsapp_policy":policy',
+            '"whatsapp_error_classification":error_classification',
+            'policy["acknowledged_historical_error_ids"]',
             "WhatsApp Outbound Safety Policy",
         ):
             self.assertIn(marker, SOURCE)

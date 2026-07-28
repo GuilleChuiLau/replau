@@ -108,6 +108,12 @@ timestamp remain actionable and fail the job. Pending logistics-email rows are
 health-impacting only when `EMAIL_NOTIFICATIONS_ENABLED=true`; when enabled,
 `EMAIL_PENDING_MAX_MINUTES` (default 30) defines when a pending row is stale.
 
+The Ops dashboard applies the same timestamp-aware classification. Historical
+rows remain visible in the raw error table and their IDs appear in the
+WhatsApp policy card, but they do not create a false `CRITICAL` state. An
+intentional `PAUSED` policy is a `WARN`; any new error at or after the pause,
+or a `TRIPPED` circuit, remains `CRITICAL`.
+
 Conversation retention retries transient PostgREST connection/5xx failures
 during startup and the oneshot service also retries after failure. Client
 errors remain immediate failures so migration or contract mistakes stay
