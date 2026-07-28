@@ -6,8 +6,35 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 import requests
+
+
+def post_with_startup_retry(url: str, payload: dict) -> requests.Response:
+    attempts = int(os.environ.get("RETENTION_HTTP_ATTEMPTS", "6"))
+    delay = float(os.environ.get("RETENTION_HTTP_RETRY_SECONDS", "5"))
+    if attempts < 1 or attempts > 12:
+        raise ValueError("RETENTION_HTTP_ATTEMPTS must be between 1 and 12")
+    response = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.post(url, json=payload, timeout=30)
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt == attempts:
+                raise
+            time.sleep(delay)
+            continue
+        if response.status_code < 500:
+            response.raise_for_status()
+            return response
+        try:
+            response.raise_for_status()
+        except requests.HTTPError:
+            if attempt == attempts:
+                raise
+            time.sleep(delay)
+    raise RuntimeError("retention HTTP retry loop exhausted")
 
 
 def retention_days(name: str, default: int, minimum: int) -> int:
@@ -24,25 +51,21 @@ def run() -> dict:
     delete_days = retention_days("WHATSAPP_REQUEST_DELETE_DAYS", 90, 30)
     if delete_days <= closed_days:
         raise ValueError("WHATSAPP_REQUEST_DELETE_DAYS must exceed WHATSAPP_REQUEST_CLOSED_REDACT_DAYS")
-    staff_response = requests.post(
+    staff_response = post_with_startup_retry(
         f"{base_url}/rpc/apply_whatsapp_staff_reply_retention",
-        json={"p_active_redact_days": active_days, "p_closed_redact_days": closed_days},
-        timeout=30,
+        {"p_active_redact_days": active_days, "p_closed_redact_days": closed_days},
     )
-    staff_response.raise_for_status()
     staff_result = staff_response.json()
     if not isinstance(staff_result, dict) or staff_result.get("ok") is not True:
         raise RuntimeError("staff reply retention RPC returned an invalid result")
-    response = requests.post(
+    response = post_with_startup_retry(
         f"{base_url}/rpc/apply_whatsapp_conversation_request_retention",
-        json={
+        {
             "p_active_redact_days": active_days,
             "p_closed_redact_days": closed_days,
             "p_delete_days": delete_days,
         },
-        timeout=30,
     )
-    response.raise_for_status()
     result = response.json()
     if not isinstance(result, dict) or result.get("ok") is not True:
         raise RuntimeError("retention RPC returned an invalid result")

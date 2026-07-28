@@ -1,13 +1,13 @@
 [Unit]
 Description=Replau stuck WhatsApp/email monitor
+After=postgrest-localapi.service
+Requires=postgrest-localapi.service
 
 [Service]
 Type=oneshot
-User=guill
-Group=guill
-WorkingDirectory=/opt/replau_ops
-EnvironmentFile=/etc/replau-ops.env
-ExecStart=/opt/replau_ops/.venv/bin/python /opt/replau_ops/replau_stuck_monitor.py
+WorkingDirectory=/home/guill/.openclaw/workspace/replau/replau_ops_package
+EnvironmentFile=/home/guill/.config/replau/ops.env
+ExecStart=/home/guill/.local/share/replau/services/ops-venv/bin/python replau_stuck_monitor.py
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

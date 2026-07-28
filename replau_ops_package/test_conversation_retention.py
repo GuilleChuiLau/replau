@@ -8,8 +8,10 @@ import replau_conversation_retention as retention
 class ConversationRetentionTest(unittest.TestCase):
     def test_posts_safe_default_retention(self):
         staff_response = Mock()
+        staff_response.status_code = 200
         staff_response.json.return_value = {"ok": True, "staff_replies_redacted": 0}
         response = Mock()
+        response.status_code = 200
         response.json.return_value = {"ok": True, "active_redacted": 0, "closed_redacted": 0, "deleted": 0}
         with patch.dict(os.environ, {"POSTGREST_BASE_URL": "http://127.0.0.1:3000"}, clear=True), patch.object(
             retention.requests, "post", side_effect=[staff_response,response]

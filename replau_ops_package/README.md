@@ -101,6 +101,18 @@ sudo systemctl start replau-stuck-monitor.service || true
 journalctl -u replau-stuck-monitor.service -n 80 --no-pager
 ```
 
+The monitor treats WhatsApp failures that predate an explicit outbound
+`PAUSED` policy as acknowledged historical incidents: it prints their IDs but
+does not fail the service on every timer run. Errors at or after the pause
+timestamp remain actionable and fail the job. Pending logistics-email rows are
+health-impacting only when `EMAIL_NOTIFICATIONS_ENABLED=true`; when enabled,
+`EMAIL_PENDING_MAX_MINUTES` (default 30) defines when a pending row is stale.
+
+Conversation retention retries transient PostgREST connection/5xx failures
+during startup and the oneshot service also retries after failure. Client
+errors remain immediate failures so migration or contract mistakes stay
+visible.
+
 ## Run WhatsApp watchdog manually
 
 ```bash
