@@ -1,5 +1,10 @@
 Most important components of the solution:
 
+Recovery after a host rebuild is documented in
+[`REPLAU_RECOVERY_RUNBOOK.md`](REPLAU_RECOVERY_RUNBOOK.md). It covers database
+restore, services, Cloudflare, Apache/Tailscale access, driver HTTPS, and public
+WhatsApp agent isolation without storing secrets.
+
 1. WhatsApp Bridge (conversation engine)
 - Handles customer chat flow, order capture, abuse/driver rules, human handoff, and pause/open ordering logic.
 - Sends customer-safe tracking links and integrates with logistics/payment state.
