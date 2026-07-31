@@ -2,25 +2,24 @@
 from __future__ import annotations
 
 import html
-import json
 import os
+import secrets
 import time
+import asyncio
 from pathlib import Path
 from typing import Any, Dict
 from urllib.parse import quote
 
 import requests
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 POSTGREST_BASE_URL = os.environ.get("POSTGREST_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
 KITCHEN_HOST = os.environ.get("KITCHEN_HOST", "127.0.0.1")
 KITCHEN_PORT = int(os.environ.get("KITCHEN_PORT", "8791"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "30"))
 AUTO_REFRESH_SECONDS = int(os.environ.get("AUTO_REFRESH_SECONDS", "15"))
-CLEARED_KITCHEN_ORDERS_PATH = Path(os.environ.get("CLEARED_KITCHEN_ORDERS_PATH", "/home/guill/.openclaw/workspace/replau_cleared_kitchen_orders.json"))
-
-app = FastAPI(title="Replau Kitchen UI", version="1.0.0")
+app = FastAPI(title="Replau Kitchen UI", version="4.0.0")
 
 
 def esc(value: Any) -> str:
@@ -127,37 +126,44 @@ def post_rpc(name: str, payload: Dict[str, Any]) -> Any:
     )
 
 
-def load_cleared_kitchen_order_ids() -> set[int]:
-    try:
-        if CLEARED_KITCHEN_ORDERS_PATH.exists():
-            data = json.loads(CLEARED_KITCHEN_ORDERS_PATH.read_text(encoding="utf-8"))
-            return {int(v) for v in data.get("cleared_ids", [])}
-    except Exception:
-        pass
-    return set()
-
-
-def save_cleared_kitchen_order_ids(ids: set[int]) -> None:
-    CLEARED_KITCHEN_ORDERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CLEARED_KITCHEN_ORDERS_PATH.write_text(
-        json.dumps({"cleared_ids": sorted(ids)}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
 def fetch_kitchen_orders() -> list[Dict[str, Any]]:
     orders = fetch_json("/v_kitchen_orders")
-    cleared = load_cleared_kitchen_order_ids()
-    if cleared:
-        orders = [row for row in orders if int(row.get("id") or 0) not in cleared]
+    if not orders:
+        return []
+    ids = ",".join(str(int(row["id"])) for row in orders)
+    items = fetch_json(f"/v_kitchen_order_items?pedido_id=in.({ids})&order=id.asc")
+    by_order: dict[int, list[Dict[str, Any]]] = {}
+    for item in items:
+        by_order.setdefault(int(item["pedido_id"]), []).append(item)
+    for order in orders:
+        order["items"] = by_order.get(int(order["id"]), [])
     return orders
 
 
-def kitchen_clear_form_html(order_id: Any, base: str = "") -> str:
+def order_lane(order: Dict[str, Any]) -> str:
+    if not order.get("payment_ready") or str(order.get("queue_color")).upper() in {"RED", "BLOCKED"}:
+        return "PROBLEMAS"
+    return {"NUEVO": "NUEVOS", "EN_PREPARACION": "EN PREPARACIÓN", "LISTO": "LISTOS"}.get(
+        str(order.get("kitchen_status") or "").upper(), "PROBLEMAS"
+    )
+
+
+def order_warnings(order: Dict[str, Any]) -> list[str]:
+    text = " ".join(str(v or "") for v in (
+        order.get("observacion"), order.get("kitchen_notes"),
+        *[item.get("producto_nombre") for item in order.get("items", [])],
+    )).upper()
+    return [label for marker, label in (
+        ("ALERG", "⚠ ALERGIA"), (" SIN ", "⚠ SIN / RESTRICCIÓN"), (" NO ", "⚠ NO / RESTRICCIÓN")
+    ) if marker in f" {text} "]
+
+
+def kitchen_clear_form_html(order_id: Any, version: Any, base: str = "") -> str:
     if order_id is None:
         return ""
     return f"""
       <form method="post" action="{base}/order/{esc(order_id)}/clear" onsubmit="return confirm('¿Limpiar este pedido del Kitchen Board? No cancela el pedido.');">
+        <input type="hidden" name="expected_version" value="{esc(version)}">
         <button class="button good" type="submit">Clear</button>
       </form>
     """
@@ -175,7 +181,7 @@ def kitchen_clear_all_form_html(count: int, base: str = "") -> str:
 
 def color_class(queue_color: str) -> str:
     queue_color = (queue_color or "").upper()
-    if queue_color == "RED":
+    if queue_color in {"RED", "BLOCKED"}:
         return "card red"
     if queue_color == "YELLOW":
         return "card yellow"
@@ -249,9 +255,13 @@ def dashboard(request: Request) -> HTMLResponse:
       <div class="workspace-next">{next_html}</div>
     </section>
     """
-    cards = ""
+    lane_cards: dict[str, str] = {"PROBLEMAS": "", "NUEVOS": "", "EN PREPARACIÓN": "", "LISTOS": ""}
     for order in orders:
-        cards += f"""
+        warnings = " ".join(f'<span class="warning">{esc(w)}</span>' for w in order_warnings(order))
+        item_summary = " · ".join(
+            f"{esc(item.get('cantidad'))}× {esc(item.get('producto_nombre'))}" for item in order.get("items", [])
+        ) or "Sin items"
+        lane_cards[order_lane(order)] += f"""
         <article class="{color_class(order.get('queue_color'))}">
           <div class="station-card-head">
             <div>
@@ -262,6 +272,8 @@ def dashboard(request: Request) -> HTMLResponse:
             <div class="mins">{esc(order.get('queue_minutes'))} min</div>
           </div>
           <div class="kitchen-progress">{kitchen_progress_html(order.get('kitchen_status'))}</div>
+          <div class="item-summary">{item_summary}</div>
+          <div class="warnings">{warnings}</div>
           <div class="station-facts">
             <div><span>Estado cocina</span><strong>{esc(order.get('kitchen_status'))}</strong></div>
             <div><span>Pago</span><strong>{esc(order.get('metodo_pago'))}</strong></div>
@@ -269,19 +281,21 @@ def dashboard(request: Request) -> HTMLResponse:
           </div>
           <div class="card-actions">
             <a class="button" href="{base}/order/{order.get('id')}">Ver pedido</a>
-            {kitchen_clear_form_html(order.get('id'), base)}
+            {kitchen_clear_form_html(order.get('id'), order.get('kitchen_version'), base)}
           </div>
         </article>
         """
-    if not cards:
-        cards = '<div class="empty">No hay pedidos en cocina.</div>'
+    lanes = "".join(
+        f'<section class="lane"><h2>{esc(name)} <span>{sum(1 for o in orders if order_lane(o)==name)}</span></h2>'
+        f'<div class="grid">{lane_cards[name] or "<div class=lane-empty>Vacío</div>"}</div></section>'
+        for name in ("PROBLEMAS", "NUEVOS", "EN PREPARACIÓN", "LISTOS")
+    ) if orders else '<div class="empty">No hay pedidos en cocina.</div>'
 
     return HTMLResponse(f"""<!doctype html>
 <html lang="es">
 <head>
   <meta charset="utf-8">
   <title>Kitchen Board - Replau</title>
-  <meta http-equiv="refresh" content="{AUTO_REFRESH_SECONDS}">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {{
@@ -309,6 +323,11 @@ def dashboard(request: Request) -> HTMLResponse:
     .l-yellow {{ background:linear-gradient(135deg,#ffd400,#f59e0b)!important; border-color:rgba(255,212,0,.8)!important; color:#1f1300!important; box-shadow:0 0 28px rgba(255,212,0,.28)!important; }}
     .l-red {{ background:linear-gradient(135deg,#ff1744,#b91c1c)!important; border-color:rgba(255,23,68,.75)!important; color:#ffffff!important; box-shadow:0 0 28px rgba(255,23,68,.28)!important; }}
     .grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:18px; }}
+    .lane {{ margin:24px 0; }} .lane h2 {{ display:flex; gap:10px; align-items:center; font-size:22px; }}
+    .lane h2 span {{ background:#334155; border-radius:999px; padding:3px 9px; font-size:13px; }}
+    .lane-empty {{ color:var(--muted); border:1px dashed var(--line); border-radius:18px; padding:24px; }}
+    .item-summary {{ margin:12px 0; font-size:18px; font-weight:900; line-height:1.35; }}
+    .warning {{ display:inline-block; margin:0 6px 8px 0; padding:7px 10px; border-radius:9px; background:#7f1d1d; color:#fff; font-weight:950; }}
     .workspace-panel {{ margin:0 0 24px; padding:20px 22px; background:rgba(17,24,39,.92); border:1px solid rgba(51,65,85,.95); border-radius:24px; box-shadow:var(--shadow); }}
     .workspace-head {{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; flex-wrap:wrap; margin-bottom:16px; }}
     .workspace-head h2 {{ margin:0 0 6px; font-size:26px; letter-spacing:0; }}
@@ -352,10 +371,11 @@ def dashboard(request: Request) -> HTMLResponse:
     <div class="topbar">
       <div>
         <h1>Kitchen Board</h1>
-        <div class="sub">Pantalla fija de cocina · Auto-refresh cada {AUTO_REFRESH_SECONDS} segundos</div>
+        <div class="sub">Pantalla fija de cocina · Actualización en vivo</div>
       </div>
       <div class="actions">
         <a class="button" href="{base}/">Actualizar</a>
+        <button class="button secondary" id="sound-toggle" type="button">🔇 Activar sonido</button>
         {kitchen_clear_all_form_html(len(orders), base)}
         <a class="button secondary" href="http://127.0.0.1:8790/ops/picking">Picking</a>
         <a class="button secondary" href="http://127.0.0.1:8790/ops/delivery">Delivery</a>
@@ -367,33 +387,65 @@ def dashboard(request: Request) -> HTMLResponse:
       <span class="l-red">más de 30 min</span>
     </div>
     {workspace_html}
-    <div class="grid">{cards}</div>
+    {lanes}
   </div>
+  <script>
+    const soundButton=document.getElementById("sound-toggle");
+    soundButton.onclick=()=>{{sessionStorage.kitchenSound="on";soundButton.textContent="🔊 Sonido activo";}};
+    if(sessionStorage.kitchenSound==="on") soundButton.textContent="🔊 Sonido activo";
+    const events=new EventSource("{base}/api/events");
+    events.onmessage=(event)=>{{
+      const data=JSON.parse(event.data), previous=Number(sessionStorage.kitchenMaxOrder||0);
+      sessionStorage.kitchenMaxOrder=data.max_order_id||0;
+      if(previous && data.max_order_id>previous && sessionStorage.kitchenSound==="on"){{
+        const ctx=new AudioContext(),osc=ctx.createOscillator();osc.connect(ctx.destination);osc.frequency.value=880;osc.start();osc.stop(ctx.currentTime+.25);
+      }}
+      if(previous && data.revision!==sessionStorage.kitchenRevision) location.reload();
+      sessionStorage.kitchenRevision=data.revision;
+    }};
+  </script>
 </body>
 </html>""")
 
 
 @app.get("/api/orders", response_class=JSONResponse)
 def api_orders() -> JSONResponse:
-    return JSONResponse(fetch_json("/v_kitchen_orders"))
+    return JSONResponse(fetch_kitchen_orders())
+
+
+@app.get("/api/events")
+async def kitchen_events() -> StreamingResponse:
+    async def stream():
+        while True:
+            orders = fetch_json("/v_kitchen_orders?select=id,kitchen_version,updated_at")
+            revision = "|".join(f"{o['id']}:{o['kitchen_version']}:{o['updated_at']}" for o in orders)
+            payload = {"revision": revision, "max_order_id": max([int(o["id"]) for o in orders] or [0])}
+            yield f"data: {__import__('json').dumps(payload)}\n\n"
+            await asyncio.sleep(2)
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @app.post("/order/{pedido_id}/clear")
-def clear_kitchen_order(pedido_id: int, request: Request) -> RedirectResponse:
-    cleared = load_cleared_kitchen_order_ids()
-    cleared.add(pedido_id)
-    save_cleared_kitchen_order_ids(cleared)
+def clear_kitchen_order(pedido_id: int, request: Request, expected_version: int = Form(...)) -> RedirectResponse:
+    result = post_rpc("acknowledge_kitchen_order", {
+        "p_pedido_id": pedido_id, "p_expected_version": expected_version,
+        "p_actor": "kitchen_ui", "p_reason": "CLEARED_FROM_BOARD",
+    })
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result)
     return RedirectResponse(url=f"{public_prefix(request)}/", status_code=303)
 
 
 @app.post("/orders/clear-all")
 def clear_all_kitchen_orders(request: Request) -> RedirectResponse:
     orders = fetch_kitchen_orders()
-    visible_ids = {int(row.get("id")) for row in orders if row.get("id") is not None}
-    if visible_ids:
-        cleared = load_cleared_kitchen_order_ids()
-        cleared.update(visible_ids)
-        save_cleared_kitchen_order_ids(cleared)
+    for row in orders:
+        result = post_rpc("acknowledge_kitchen_order", {
+            "p_pedido_id": int(row["id"]), "p_expected_version": int(row["kitchen_version"]),
+            "p_actor": "kitchen_ui", "p_reason": "CLEARED_ALL_FROM_BOARD",
+        })
+        if not result.get("ok"):
+            raise HTTPException(status_code=409, detail=result)
     return RedirectResponse(url=f"{public_prefix(request)}/", status_code=303)
 
 
@@ -405,6 +457,7 @@ def order_detail(pedido_id: int, request: Request) -> HTMLResponse:
         raise HTTPException(status_code=404, detail="Pedido not found")
     order = order_rows[0]
     items = fetch_json(f"/v_kitchen_order_items?pedido_id=eq.{pedido_id}&order=id.asc")
+    events = fetch_json(f"/kitchen_order_events?pedido_id=eq.{pedido_id}&order=id.desc&limit=25")
 
     rows = ""
     for item in items:
@@ -420,6 +473,11 @@ def order_detail(pedido_id: int, request: Request) -> HTMLResponse:
         rows = '<tr><td colspan="4">Sin items</td></tr>'
 
     maps_section = f"<p><strong>Dirección:</strong> {esc(order.get('direccion'))}</p>" if order.get("direccion") else ""
+    event_rows = "".join(
+        f"<tr><td>{esc(e.get('created_at'))}</td><td>{esc(e.get('event_type'))}</td>"
+        f"<td>{esc(e.get('from_status'))} → {esc(e.get('to_status'))}</td><td>{esc(e.get('actor'))}</td></tr>"
+        for e in events
+    ) or '<tr><td colspan="4">Sin eventos todavía</td></tr>'
 
     return HTMLResponse(f"""<!doctype html>
 <html lang="es">
@@ -466,10 +524,12 @@ def order_detail(pedido_id: int, request: Request) -> HTMLResponse:
       <p><strong>Cliente:</strong> {esc(order.get('cliente_nombre'))}</p>
       <p><strong>WhatsApp:</strong> {esc(order.get('whatsapp_number'))}</p>
       <p><strong>Pago:</strong> {esc(order.get('metodo_pago'))}</p>
+      <p><strong>Estado de pago:</strong> {esc(order.get('payment_fulfillment_status'))}</p>
       <p><strong>Total:</strong> {money(order.get('total'))}</p>
       {maps_section}
       <p><strong>Notas cocina:</strong> {esc(order.get('kitchen_notes'))}</p>
       <form method="post" action="{base}/order/{order.get('id')}/status">
+        <input type="hidden" name="expected_version" value="{esc(order.get('kitchen_version'))}">
         <label for="notes"><strong>Actualizar notas cocina</strong></label>
         <textarea id="notes" name="notes">{esc(order.get('kitchen_notes'))}</textarea>
         <div class="buttons">
@@ -495,26 +555,35 @@ def order_detail(pedido_id: int, request: Request) -> HTMLResponse:
         <tbody>{rows}</tbody>
       </table>
     </div>
+    <div class="card">
+      <h2>Historial inmutable</h2>
+      <table><thead><tr><th>Fecha</th><th>Evento</th><th>Cambio</th><th>Actor</th></tr></thead>
+      <tbody>{event_rows}</tbody></table>
+    </div>
   </div>
 </body>
 </html>""")
 
 
 @app.post("/order/{pedido_id}/status")
-def order_status(pedido_id: int, request: Request, status: str = Form(...), notes: str = Form("")):
+def order_status(
+    pedido_id: int, request: Request, status: str = Form(...),
+    expected_version: int = Form(...), notes: str = Form("")
+):
     result = post_rpc(
-        "update_kitchen_status",
+        "transition_kitchen_order",
         {
             "p_pedido_id": pedido_id,
-            "p_kitchen_status": status,
-            "p_kitchen_notes": notes or None,
-            # Include p_notify explicitly so PostgREST selects the 4-argument
-            # update_kitchen_status overload installed by the notifications upgrade.
+            "p_target_status": status,
+            "p_expected_version": expected_version,
+            "p_actor": "kitchen_ui",
+            "p_notes": notes or None,
             "p_notify": True,
+            "p_idempotency_key": f"kitchen-ui:{pedido_id}:{expected_version}:{status}:{secrets.token_hex(8)}",
         },
     )
     if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result)
+        raise HTTPException(status_code=409, detail=result)
     return RedirectResponse(url=f"{public_prefix(request)}/order/{pedido_id}", status_code=303)
 
 

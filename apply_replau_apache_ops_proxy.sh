@@ -25,6 +25,7 @@ if [[ -n "${TAILSCALE_IP}" ]]; then
     echo "Try: http://${TAILSCALE_IP}/picking"
     echo "Try: http://${TAILSCALE_IP}/delivery"
     echo "Try: http://${TAILSCALE_IP}/kitchen/"
+    echo "Tailscale Serve Kitchen backend: http://127.0.0.1:8788/"
 else
     echo "Tailscale IPv4 address unavailable; local URL: http://127.0.0.1/dashboard"
 fi
