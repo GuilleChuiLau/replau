@@ -19,5 +19,8 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install CI dependencies
+        run: python3 -m pip install -r replau_ops_package/requirements.txt
+
       - name: Run static gate
         run: python3 replau_ci_cd_gate.py --skip-deploy-drift --skip-http
