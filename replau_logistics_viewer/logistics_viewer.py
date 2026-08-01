@@ -723,6 +723,15 @@ def order_token(order: Dict[str, Any]) -> str:
         return ""
 
 
+def staff_order_url(order: Dict[str, Any]) -> str:
+    """Return the private Logistics detail URL, never the public tracking origin."""
+    pedido_num = str(order.get("pedido_num") or "").strip()
+    token = order_token(order)
+    if not pedido_num or not token:
+        return ""
+    return f"/order/{quote(pedido_num, safe='')}?token={quote(token, safe='')}"
+
+
 def is_pickup_fulfillment(order: Dict[str, Any]) -> bool:
     # Best-effort pickup detection without requiring a DB schema change.
     notes = str(order.get("observacion") or "").upper()
@@ -1200,7 +1209,7 @@ def render_dashboard_page(
           <td>{esc(trim_text(order.get('direccion_confirmada') or order.get('direccion_detectada'), 80))}</td>
           <td>
             <div class="actions">
-              <a class="button" href="{esc(order.get('order_url') or '#')}" target="_blank">Ver pedido</a>
+              {f'<a class="button" href="{esc(staff_order_url(order))}" target="_blank">Ver pedido</a>' if staff_order_url(order) else ''}
               <a class="button secondary" href="{esc(order.get('maps_url') or '#')}" target="_blank">Maps</a>
               {f'<a class="button warn" href="ops/picking/{esc(order.get("pedido_num"))}?token={quote(order_token(order), safe="")}">Picking</a>' if order_token(order) and order_workflow_stage(order) == 'picking' else ''}
               {f'<a class="button danger" href="ops/delivery/{esc(order.get("pedido_num"))}?token={quote(order_token(order), safe="")}">Delivery</a>' if order_token(order) and order_workflow_stage(order) == 'delivery' else ''}
@@ -1256,11 +1265,11 @@ def render_dashboard_page(
         for e in urgent_emails
     ) or '<div class="list-item">Sin emails urgentes.</div>'
     dispatch_list = "".join(
-        f'''<div class="list-item"><strong>{esc(o.get("pedido_num"))} · {esc(o.get("cliente_nombre"))}</strong><div style="display:flex;gap:8px;flex-wrap:wrap">{badge_html(o.get("estado"))}{payment_badge_html(o.get("metodo_pago"))}</div><div class="tiny">{money(o.get("total"))} · {esc(trim_text(o.get("direccion_confirmada") or o.get("direccion_detectada"), 70))}</div><div class="actions" style="margin-top:10px">{f'<a class="button" href="{esc(o.get("order_url") or "#")}" target="_blank">Ver pedido</a>' if o.get("order_url") else ''}{f'<form method="post" action="/order/{esc(o.get("pedido_num"))}/status" onsubmit="return confirm(\'¿Limpiar {esc(o.get("pedido_num"))} de Pedidos a mover? Se marcará como ANULADO y saldrá de la cola activa.\');"><input type="hidden" name="token" value="{esc(order_token(o))}"><input type="hidden" name="next_url" value="/dashboard"><button class="button good" name="estado" value="ANULADO">Clear</button></form>' if order_token(o) else ''}</div></div>'''
+        f'''<div class="list-item"><strong>{esc(o.get("pedido_num"))} · {esc(o.get("cliente_nombre"))}</strong><div style="display:flex;gap:8px;flex-wrap:wrap">{badge_html(o.get("estado"))}{payment_badge_html(o.get("metodo_pago"))}</div><div class="tiny">{money(o.get("total"))} · {esc(trim_text(o.get("direccion_confirmada") or o.get("direccion_detectada"), 70))}</div><div class="actions" style="margin-top:10px">{f'<a class="button" href="{esc(staff_order_url(o))}" target="_blank">Ver pedido</a>' if staff_order_url(o) else ''}{f'<form method="post" action="/order/{esc(o.get("pedido_num"))}/status" onsubmit="return confirm(\'¿Limpiar {esc(o.get("pedido_num"))} de Pedidos a mover? Se marcará como ANULADO y saldrá de la cola activa.\');"><input type="hidden" name="token" value="{esc(order_token(o))}"><input type="hidden" name="next_url" value="/dashboard"><button class="button good" name="estado" value="ANULADO">Clear</button></form>' if order_token(o) else ''}</div></div>'''
         for o in dispatch_orders
     ) or '<div class="list-item">Sin pedidos en operación.</div>'
     exception_list = "".join(
-        f'''<div class="list-item"><strong>{esc(o.get("pedido_num"))} · {esc(o.get("cliente_nombre"))}</strong><div style="display:flex;gap:8px;flex-wrap:wrap">{badge_html(o.get("estado"))}{payment_fulfillment_badge(o)}</div><div class="warning" style="margin-top:8px">{esc(" · ".join(o.get("logistics_exceptions") or []))}</div><div class="actions" style="margin-top:10px">{f'<a class="button" href="{esc(o.get("order_url") or "#")}" target="_blank">Abrir pedido</a>' if o.get("order_url") else ''}<a class="button warn" href="{esc(payment_proof_review_url())}" target="_blank">Pagos</a></div></div>'''
+        f'''<div class="list-item"><strong>{esc(o.get("pedido_num"))} · {esc(o.get("cliente_nombre"))}</strong><div style="display:flex;gap:8px;flex-wrap:wrap">{badge_html(o.get("estado"))}{payment_fulfillment_badge(o)}</div><div class="warning" style="margin-top:8px">{esc(" · ".join(o.get("logistics_exceptions") or []))}</div><div class="actions" style="margin-top:10px">{f'<a class="button" href="{esc(staff_order_url(o))}" target="_blank">Abrir pedido</a>' if staff_order_url(o) else ''}<a class="button warn" href="{esc(payment_proof_review_url())}" target="_blank">Pagos</a></div></div>'''
         for o in exception_orders[:12]
     ) or '<div class="list-item">Sin excepciones operativas.</div>'
 

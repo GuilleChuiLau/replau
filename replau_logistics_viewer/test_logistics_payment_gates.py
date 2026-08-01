@@ -14,6 +14,12 @@ LOAD_MATCHING_TEST = Path(__file__).parents[1].joinpath("postgrest_local/test_lo
 
 
 class LogisticsPaymentGateContractTests(unittest.TestCase):
+    def test_staff_order_links_never_use_public_order_url(self) -> None:
+        self.assertIn('def staff_order_url(', SOURCE)
+        self.assertIn('return f"/order/{quote(pedido_num', SOURCE)
+        self.assertNotIn('href="{esc(order.get(\'order_url\')', SOURCE)
+        self.assertNotIn('href="{esc(o.get("order_url")', SOURCE)
+
     def test_dispatch_and_completion_have_separate_payment_gates(self) -> None:
         for marker in (
             'PREPAID_RELEASED_STATES = {"RELEASED", "RECONCILED", "SETTLED"}',
