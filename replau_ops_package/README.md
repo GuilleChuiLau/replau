@@ -127,6 +127,13 @@ journalctl -u replau-whatsapp-watchdog.service -n 80 --no-pager
 ```
 
 The watchdog reports `connected`, `degraded`, `impacted`, or `stale`.
+Set `WHATSAPP_WATCHDOG_ACCOUNT` to the OpenClaw account ID used by Replau
+(currently `secondary`). The watchdog selects that account from the multi-account
+health response and records its inbound/outbound activity separately.
+
+The authenticated Ops dashboard includes an emergency WhatsApp outbound pause.
+An operator must provide a reason and type `PAUSE`; the control calls the
+fail-closed database policy RPC and preserves queued messages for later review.
 `degraded` means reconnect churn is present but messages are not stuck.
 `impacted` means the WhatsApp outbox has pending/sending/error rows that need attention.
 

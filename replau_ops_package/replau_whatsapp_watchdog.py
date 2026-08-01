@@ -14,6 +14,7 @@ from urllib.request import urlopen
 POSTGREST_BASE_URL = os.environ.get("POSTGREST_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
 GATEWAY_HEALTH_URL = os.environ.get("OPENCLAW_GATEWAY_HEALTH_URL", "http://127.0.0.1:18789/health")
 OPENCLAW_CLI = os.environ.get("OPENCLAW_HEALTH_CLI", "/home/guill/.npm-global/bin/openclaw")
+WHATSAPP_ACCOUNT = os.environ.get("WHATSAPP_WATCHDOG_ACCOUNT", "secondary").strip()
 GATEWAY_SERVICE = os.environ.get("OPENCLAW_GATEWAY_SERVICE", "openclaw-gateway.service")
 JOURNAL_SINCE = os.environ.get("WHATSAPP_WATCHDOG_JOURNAL_SINCE", "12 hours ago")
 STALE_SECONDS = int(os.environ.get("WHATSAPP_WATCHDOG_STALE_SECONDS", "180"))
@@ -201,6 +202,19 @@ def seconds_since_epoch_ms(value: int | float | None) -> int | None:
         return None
 
 
+def select_whatsapp_account(channel_health: dict, account_id: str) -> dict:
+    """Select one configured account while supporting legacy single-account health."""
+    if not isinstance(channel_health, dict):
+        return {}
+    accounts = channel_health.get("accounts")
+    if isinstance(accounts, dict):
+        selected = accounts.get(account_id)
+        return selected if isinstance(selected, dict) else {}
+    if not account_id or channel_health.get("accountId") in {None, account_id}:
+        return channel_health
+    return {}
+
+
 def outbox_impact() -> dict:
     try:
         rows = postgrest_json(
@@ -210,6 +224,7 @@ def outbox_impact() -> dict:
             "&order=created_at.asc"
             "&limit=200"
         )
+        policies = postgrest_json("/whatsapp_outbound_policy?select=updated_at&limit=1")
     except Exception as exc:
         return {
             "ok": False,
@@ -225,12 +240,23 @@ def outbox_impact() -> dict:
         rows = []
 
     counts = {"PENDING": 0, "SENDING": 0, "ERROR": 0}
+    baseline_at = None
+    if isinstance(policies, list) and policies:
+        baseline_at = parse_event_time(policies[0].get("updated_at"))
+    actionable_error_count = 0
+    historical_error_count = 0
     oldest_active_age = None
     stale_rows: list[dict] = []
     for row in rows:
         status = str(row.get("status") or "").upper()
         if status in counts:
             counts[status] += 1
+        if status == "ERROR":
+            incident_at = parse_event_time(row.get("last_attempt_at") or row.get("created_at"))
+            if baseline_at and incident_at and incident_at < baseline_at:
+                historical_error_count += 1
+            else:
+                actionable_error_count += 1
         if status not in {"PENDING", "SENDING"}:
             continue
         created_age = seconds_since(row.get("created_at"))
@@ -242,13 +268,16 @@ def outbox_impact() -> dict:
                 stale_rows.append({"id": row.get("id"), "status": status, "age_seconds": age})
 
     stale_count = len(stale_rows)
-    impacting = stale_count >= OUTBOX_IMPACT_THRESHOLD or counts["ERROR"] >= OUTBOX_IMPACT_THRESHOLD
+    impacting = stale_count >= OUTBOX_IMPACT_THRESHOLD or actionable_error_count >= OUTBOX_IMPACT_THRESHOLD
     return {
         "ok": True,
         "impacting": impacting,
         "pending_count": counts["PENDING"],
         "sending_count": counts["SENDING"],
         "error_count": counts["ERROR"],
+        "actionable_error_count": actionable_error_count,
+        "historical_error_count": historical_error_count,
+        "policy_baseline_at": policies[0].get("updated_at") if isinstance(policies, list) and policies else None,
         "stale_count": stale_count,
         "oldest_active_age_seconds": oldest_active_age,
         "stale_seconds": OUTBOX_STALE_SECONDS,
@@ -291,7 +320,8 @@ def main() -> int:
     outbox = outbox_impact()
     events = journal_events()
     incidents = disconnect_incidents(events)
-    whatsapp_health = (health.get("json") or {}).get("channels", {}).get("whatsapp", {})
+    whatsapp_channel_health = (health.get("json") or {}).get("channels", {}).get("whatsapp", {})
+    whatsapp_health = select_whatsapp_account(whatsapp_channel_health, WHATSAPP_ACCOUNT)
     health_connected = bool(whatsapp_health.get("connected") or whatsapp_health.get("linked"))
     health_state = whatsapp_health.get("healthState") or whatsapp_health.get("statusState")
     health_activity_age = seconds_since_epoch_ms(
@@ -391,6 +421,12 @@ def main() -> int:
             "gateway_health": health,
             "whatsapp_health_state": health_state,
             "whatsapp_health_connected": health_connected,
+            "whatsapp_account": WHATSAPP_ACCOUNT,
+            "whatsapp_account_found": bool(whatsapp_health),
+            "last_inbound_at": whatsapp_health.get("lastInboundAt"),
+            "last_outbound_at": whatsapp_health.get("lastOutboundAt"),
+            "seconds_since_inbound": seconds_since_epoch_ms(whatsapp_health.get("lastInboundAt")),
+            "seconds_since_outbound": seconds_since_epoch_ms(whatsapp_health.get("lastOutboundAt")),
             "seconds_since_health_activity": health_activity_age,
             "connected": connected,
             "status": (

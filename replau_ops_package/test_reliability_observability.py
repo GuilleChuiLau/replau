@@ -15,6 +15,17 @@ DASHBOARD_SOURCE = Path(__file__).with_name("replau_health_dashboard.py").read_t
 
 
 class WhatsAppIncidentTests(unittest.TestCase):
+    def test_watchdog_selects_requested_account(self) -> None:
+        health={"accountId":"default","accounts":{"default":{"connected":True},"secondary":{"connected":False,"healthState":"degraded"}}}
+        self.assertEqual(
+            {"connected":False,"healthState":"degraded"},
+            watchdog.select_whatsapp_account(health,"secondary"),
+        )
+
+    def test_watchdog_does_not_fall_back_to_wrong_account(self) -> None:
+        health={"accountId":"default","accounts":{"default":{"connected":True}}}
+        self.assertEqual({},watchdog.select_whatsapp_account(health,"secondary"))
+
     def test_paused_policy_acknowledges_only_pre_pause_outbox_errors(self) -> None:
         rows=[
             {"id":39,"last_attempt_at":"2026-07-24T11:44:33-05:00"},
@@ -26,13 +37,13 @@ class WhatsAppIncidentTests(unittest.TestCase):
         self.assertEqual([40],[row["id"] for row in result["actionable"]])
         self.assertEqual([39],[row["id"] for row in result["historical"]])
 
-    def test_active_policy_keeps_historical_errors_actionable(self) -> None:
+    def test_active_policy_transition_acknowledges_older_errors(self) -> None:
         rows=[{"id":39,"last_attempt_at":"2026-07-24T11:44:33-05:00"}]
         result=dashboard.classify_whatsapp_rows(
             rows,{"state":"ACTIVE","updated_at":"2026-07-26T21:56:48-05:00"}
         )
-        self.assertEqual(rows,result["actionable"])
-        self.assertEqual([],result["historical"])
+        self.assertEqual([],result["actionable"])
+        self.assertEqual(rows,result["historical"])
 
     def test_duplicate_disconnect_log_lines_are_one_incident(self) -> None:
         events = [

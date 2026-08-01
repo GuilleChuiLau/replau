@@ -46,19 +46,19 @@ def parse_dt(v):
     except Exception:
         return None
 def classify_whatsapp_rows(rows,policy):
-    if not policy or policy.get("state")!="PAUSED":
+    if not policy:
         return {"actionable":list(rows or []),"historical":[]}
-    paused_at=parse_dt(policy.get("updated_at"))
-    if not paused_at:
+    baseline_at=parse_dt(policy.get("updated_at"))
+    if not baseline_at:
         return {"actionable":list(rows or []),"historical":[]}
-    if paused_at.tzinfo is None:
-        paused_at=paused_at.replace(tzinfo=timezone.utc)
+    if baseline_at.tzinfo is None:
+        baseline_at=baseline_at.replace(tzinfo=timezone.utc)
     actionable=[]; historical=[]
     for row in rows or []:
         incident_at=parse_dt(row.get("last_attempt_at") or row.get("created_at"))
         if incident_at and incident_at.tzinfo is None:
             incident_at=incident_at.replace(tzinfo=timezone.utc)
-        (historical if incident_at and incident_at<paused_at else actionable).append(row)
+        (historical if incident_at and incident_at<baseline_at else actionable).append(row)
     return {"actionable":actionable,"historical":historical}
 def business_day_window():
     tz=ZoneInfo(BUSINESS_TZ)
@@ -628,6 +628,20 @@ async def update_restaurant_status(req:Request,x_ops_token:Optional[str]=Header(
     customer_message=form.get("customer_message","")
     save_restaurant_status(accepting_orders.lower() in {"true","1","yes","on","open"},reason,customer_message,"ops-dashboard")
     return RedirectResponse(url=with_token("/?flash=Restaurant+status+updated",req),status_code=303)
+@app.post("/api/whatsapp-emergency-pause")
+async def whatsapp_emergency_pause(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
+    auth(req,x_ops_token)
+    form={k:v[-1] if v else "" for k,v in parse_qs((await req.body()).decode("utf-8"),keep_blank_values=True).items()}
+    reason=form.get("reason","").strip()
+    confirmation=form.get("confirmation","").strip().upper()
+    if confirmation!="PAUSE":
+        raise HTTPException(400,"Type PAUSE to confirm")
+    if len(reason)<3:
+        raise HTTPException(400,"A reason is required")
+    result=pg_post("/rpc/set_whatsapp_outbound_policy_state",{"p_state":"PAUSED","p_reason":reason,"p_actor":"ops-dashboard"})
+    if not result["ok"]:
+        raise HTTPException(502,result.get("error") or "Unable to pause WhatsApp outbound")
+    return RedirectResponse(url=with_token("/?flash=WhatsApp+outbound+paused",req),status_code=303)
 @app.get("/api/conversation-requests")
 def api_conversation_requests(req:Request,status:str="",priority:str="",assigned:str="",unread:str="",q:str="",x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
     auth(req,x_ops_token)
@@ -830,11 +844,15 @@ def dash(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-
     summary_note='' if bsum.get("ok") else f'<div class="flash badline">Business summary error: {esc(bsum.get("error"))}</div>'
     summary_day=bsum.get("day",{})
     whatsapp_rows=[{
+        "account":w.get("whatsapp_account"),
+        "account_found":w.get("whatsapp_account_found"),
         "status":w.get("status"),
         "connected":w.get("connected"),
         "gateway_health_ok":w.get("gateway_health_ok"),
         "gateway_service_active":w.get("gateway_service_active"),
         "checked_at":w.get("checked_at"),
+        "seconds_since_inbound":w.get("seconds_since_inbound"),
+        "seconds_since_outbound":w.get("seconds_since_outbound"),
         "last_connected_at":w.get("last_connected_at"),
         "last_disconnect_at":w.get("last_disconnect_at"),
         "seconds_since_disconnect":w.get("seconds_since_disconnect"),
@@ -855,8 +873,8 @@ def dash(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-
 <div class="grid"><div class="card"><h2>Low Stock Risk</h2>{stock_risk_rows(owner.get("stock_risks",[]))}</div><div class="card"><h2>Margin Signals</h2>{margin_signal_rows(owner.get("margin_rows",[]))}</div></div>
 <div class="card"><h2>Manager Command Console</h2><div class="grid3"><div><h3>Ordering</h3><p>{status_badge}</p><p class="muted">Last update: {esc(rs.get("updated_at") or "not set")} by {esc(rs.get("updated_by"))}</p><form method="post" action="/api/restaurant-status{token_query(req)}"><label>Order intake</label><select name="accepting_orders"><option value="true" {"selected" if rs.get("accepting_orders") else ""}>Accept orders</option><option value="false" {"selected" if not rs.get("accepting_orders") else ""}>Pause orders</option></select><label>Internal reason</label><input name="reason" value="{esc(rs.get("reason"))}" placeholder="Closed, sold out, maintenance"><label>Customer message while paused</label><textarea name="customer_message">{esc(rs.get("customer_message"))}</textarea><br><br><button type="submit">Save ordering status</button></form></div><div><h3>Catalog</h3><p><strong>{esc(prod.get("active"))}</strong> active products<br><strong>{esc(prod.get("inactive"))}</strong> inactive products</p><p class="muted">Use Product Admin for availability, recipe costs, and low-stock alerts.</p><a class="btn" href="{esc(product_admin_url("costs"))}" target="_blank">Open Low Stock / Costs</a> <a class="btn secondary" href="{esc(product_admin_url())}" target="_blank">Open Product Admin</a></div><div><h3>Review Queues</h3><p>Payment proofs, failed WhatsApp outbox, pending emails, and kitchen state are below.</p><a class="btn" href="{esc(payment_proof_review_url())}" target="_blank">Open Payment Proofs</a> <a class="btn secondary" href="http://127.0.0.1:8790/dashboard" target="_blank">Open Logistics</a></div></div></div>
 <div class="grid"><div class="card"><h2>Critical</h2><ul>{ul(h["critical"])}</ul></div><div class="card"><h2>Warnings</h2><ul>{ul(h["warnings"])}</ul></div></div>
-<div class="card"><h2>WhatsApp Gateway</h2>{tbl(whatsapp_rows,["status","connected","gateway_health_ok","gateway_service_active","checked_at","last_connected_at","last_disconnect_at","seconds_since_disconnect","last_recovery_seconds","disconnects_1h","disconnects_24h","last_restart_at","last_restart_reason"])}</div>
-<div class="card"><h2>WhatsApp Outbound Safety Policy</h2>{tbl([h["whatsapp_policy"]],["state","state_reason","hourly_limit","daily_limit","recipient_hourly_limit","session_hours","failure_trip_threshold","consecutive_failures","opted_out_count","recent_decision_counts","acknowledged_historical_stuck_ids","acknowledged_historical_error_ids","tripped_at","updated_at","updated_by"])}</div>
+<div class="card"><h2>WhatsApp Gateway</h2>{tbl(whatsapp_rows,["account","account_found","status","connected","gateway_health_ok","gateway_service_active","checked_at","seconds_since_inbound","seconds_since_outbound","last_connected_at","last_disconnect_at","seconds_since_disconnect","last_recovery_seconds","disconnects_1h","disconnects_24h","last_restart_at","last_restart_reason"])}</div>
+<div class="card"><h2>WhatsApp Outbound Safety Policy</h2>{tbl([h["whatsapp_policy"]],["state","state_reason","hourly_limit","daily_limit","recipient_hourly_limit","session_hours","failure_trip_threshold","consecutive_failures","opted_out_count","recent_decision_counts","acknowledged_historical_stuck_ids","acknowledged_historical_error_ids","tripped_at","updated_at","updated_by"])}<h3>Emergency pause</h3><p class="muted">Immediately blocks new outbound deliveries. Queued messages remain preserved.</p><form method="post" action="/api/whatsapp-emergency-pause{token_query(req)}"><label>Reason</label><input name="reason" required minlength="3" placeholder="Incident or operational reason"><label>Type PAUSE to confirm</label><input name="confirmation" required autocomplete="off"><br><br><button type="submit">Pause WhatsApp outbound</button></form></div>
 <div class="card"><h2>Latest backup</h2><p>{backup_html}</p></div>
 <div class="card"><h2>Services</h2>{tbl(service_rows,["service","active","enabled"])}</div>
 <div class="grid"><div class="card"><h2>Ports</h2>{tbl(port_rows,["name","ok","host","port","error"])}</div><div class="card"><h2>URLs</h2>{tbl(url_rows,["name","ok","status","ms","url","error"])}</div></div>

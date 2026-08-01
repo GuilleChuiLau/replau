@@ -17,6 +17,9 @@ class WhatsAppPolicyVisibilityTests(unittest.TestCase):
             '"whatsapp_error_classification":error_classification',
             'policy["acknowledged_historical_error_ids"]',
             "WhatsApp Outbound Safety Policy",
+            '@app.post("/api/whatsapp-emergency-pause")',
+            '"p_state":"PAUSED"',
+            "Type PAUSE to confirm",
         ):
             self.assertIn(marker, SOURCE)
 
