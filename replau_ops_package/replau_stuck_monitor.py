@@ -33,7 +33,10 @@ def parse_timestamp(value: Any) -> datetime | None:
 def split_actionable_whatsapp(
     rows: list[dict[str, Any]], policy: dict[str, Any] | None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if not policy or policy.get("state") != "PAUSED":
+    # The latest explicit policy decision is the operational baseline. Rows
+    # older than it remain visible for audit but are no longer actionable,
+    # whether the new decision paused or re-enabled delivery.
+    if not policy:
         return rows, []
     paused_at = parse_timestamp(policy.get("updated_at"))
     if paused_at is None:
@@ -94,8 +97,8 @@ def main() -> int:
         print(
             "ACKNOWLEDGED HISTORICAL WHATSAPP:",
             {
-                "policy_state": "PAUSED",
-                "paused_at": policy.get("updated_at") if policy else None,
+                "policy_state": policy.get("state") if policy else None,
+                "baseline_at": policy.get("updated_at") if policy else None,
                 "stuck_ids": [row.get("id") for row in historical_stuck],
                 "error_ids": [row.get("id") for row in historical_errors],
             },

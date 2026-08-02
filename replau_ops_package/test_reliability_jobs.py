@@ -18,13 +18,16 @@ def test_paused_policy_acknowledges_only_failures_before_pause():
     assert [row["id"] for row in historical] == [1]
 
 
-def test_active_policy_keeps_all_failures_actionable():
-    rows = [{"id": 1, "last_attempt_at": "2026-07-24T11:44:33-05:00"}]
+def test_active_policy_uses_activation_as_new_incident_baseline():
+    rows = [
+        {"id": 1, "last_attempt_at": "2026-07-24T11:44:33-05:00"},
+        {"id": 2, "last_attempt_at": "2026-08-02T11:44:33-05:00"},
+    ]
     actionable, historical = monitor.split_actionable_whatsapp(
-        rows, {"state": "ACTIVE", "updated_at": datetime.now(timezone.utc).isoformat()}
+        rows, {"state": "ACTIVE", "updated_at": "2026-08-01T16:26:13-05:00"}
     )
-    assert actionable == rows
-    assert historical == []
+    assert [row["id"] for row in actionable] == [2]
+    assert [row["id"] for row in historical] == [1]
 
 
 def test_email_pending_is_ignored_when_channel_disabled():
