@@ -4,7 +4,7 @@ APP_DIR="/opt/replau_ops"
 ENV_FILE="/etc/replau-ops.env"
 sudo mkdir -p "$APP_DIR"
 sudo chown -R "$USER:$USER" "$APP_DIR"
-cp replau_health_dashboard.py replau_stuck_monitor.py replau_backup.sh requirements.txt .env.example \
+cp replau_health_dashboard.py replau_bi.py replau_stuck_monitor.py replau_backup.sh requirements.txt .env.example \
   replau-health-dashboard.service replau-daily-backup.service replau-daily-backup.timer \
   replau-stuck-monitor.service replau-stuck-monitor.timer replau_whatsapp_watchdog.py \
   replau-whatsapp-watchdog.service replau-whatsapp-watchdog.timer test_replau_ops.sh "$APP_DIR/"

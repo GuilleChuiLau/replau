@@ -27,3 +27,13 @@ in the dashboard, Picking Station, and Delivery Station.
 The payment-fulfillment migration must be installed before this version is
 deployed. The viewer remains bound to localhost; customer tracking continues to
 use signed order tokens through the restricted public routes.
+
+## Scanner picking
+
+Apply `postgrest_local/add_scanner_picking.sql` before deploying this version.
+The Picking page accepts USB/Bluetooth scanners in keyboard mode. Internal
+product codes are seeded as barcodes; real EAN/UPC aliases can be inserted into
+`api.product_barcodes`. Every scan is audited and the database rejects unknown,
+wrong-order, and excess scans. Dispatch is blocked until every order line is
+complete. Completion consumes the stock reservation, records stock movements,
+closes the scan session, and moves the order to Delivery atomically.

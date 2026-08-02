@@ -79,7 +79,7 @@ class LogisticsPaymentGateContractTests(unittest.TestCase):
             'Listo + asignar',
             '@app.post("/ops/picking/handoff-delivery")',
             'def picking_handoff_delivery(',
-            '"p_estado": "DESPACHADO"',
+            '"complete_scanner_picking"',
             'return delivery_assign_driver(pedido_num=pedido_num, repartidor_id=repartidor_id)',
         ):
             self.assertIn(marker, SOURCE)

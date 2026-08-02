@@ -9,7 +9,8 @@ from typing import Optional
 from urllib.parse import parse_qs, quote
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from replau_bi import fetch_report, report_csv
 
 POSTGREST_BASE_URL=os.environ.get("POSTGREST_BASE_URL","http://127.0.0.1:3000").rstrip("/")
 DASHBOARD_HOST=os.environ.get("DASHBOARD_HOST","127.0.0.1")
@@ -117,6 +118,7 @@ def payment_proof_review_url():
 def erp_nav(req:Request):
     return f'''<div class="erp-nav" aria-label="Replau ERP navigation">
 <a href="/{token_query(req)}">Ops</a>
+<a href="/analytics{token_query(req)}">Analytics</a>
 <a href="/conversation-requests{token_query(req)}">WhatsApp Requests</a>
 <a href="http://127.0.0.1:8790/dashboard">Logistics</a>
 <a href="http://127.0.0.1:8791/">Kitchen</a>
@@ -610,6 +612,19 @@ def api(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-T
 @app.get("/api/business-summary")
 def api_business_summary(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
     auth(req,x_ops_token); return business_summary()
+@app.get("/api/analytics")
+def api_analytics(req:Request,start:str="",end:str="",x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
+    auth(req,x_ops_token)
+    try: return fetch_report(pg,start,end,BUSINESS_TZ)
+    except ValueError as e: raise HTTPException(400,str(e))
+@app.get("/api/analytics.csv")
+def api_analytics_csv(req:Request,start:str="",end:str="",x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
+    auth(req,x_ops_token)
+    try: report=fetch_report(pg,start,end,BUSINESS_TZ)
+    except ValueError as e: raise HTTPException(400,str(e))
+    if not report.get("ok"): raise HTTPException(502,report.get("error") or "Analytics unavailable")
+    name=f"replau-orders-{report['range']['start']}-{report['range']['end']}.csv"
+    return Response(report_csv(report),media_type="text/csv; charset=utf-8",headers={"Content-Disposition":f'attachment; filename="{name}"'})
 @app.get("/api/owner-command")
 def api_owner_command(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
     auth(req,x_ops_token)
@@ -784,6 +799,22 @@ def inbox_reply_form(row,req,templates):
     options='<option value="">Write a custom reply</option>'+"".join(f'<option value="{esc(x.get("message_text"))}">{esc(x.get("label"))}</option>' for x in templates)
     key="staff-reply-"+secrets.token_urlsafe(18)
     return f'''<div class="reply-box"><h3>Reply on WhatsApp</h3><form class="reply-form" method="post" action="/api/conversation-requests/{rid}/reply{token_query(req)}"><input type="hidden" name="idempotency_key" value="{esc(key)}"><label>Operator<input name="actor" value="{esc(row.get('assigned_to') or 'ops-dashboard')}" maxlength="80" required></label><label>Canned reply<select onchange="if(this.value) this.form.message_text.value=this.value">{options}</select></label><label class="full">Message preview<textarea name="message_text" maxlength="2000" required placeholder="Write the exact message the customer will receive"></textarea></label><button type="submit"{disabled}>Previewed — queue reply</button></form><p class="muted">Duplicate-safe delivery through the WhatsApp outbox. Blocked conversations cannot be replied to.</p></div>'''
+@app.get("/analytics",response_class=HTMLResponse)
+def analytics_page(req:Request,start:str="",end:str="",x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
+    auth(req,x_ops_token)
+    try: report=fetch_report(pg,start,end,BUSINESS_TZ)
+    except ValueError as e: raise HTTPException(400,str(e))
+    if not report.get("ok"): raise HTTPException(502,report.get("error") or "Analytics unavailable")
+    r=report["range"]; s=report["summary"]; op=report["operations"]; pay=report["payments"]
+    csv_url=with_token(f"/api/analytics.csv?start={r['start']}&end={r['end']}",req)
+    daily=tbl(report["daily_trends"],["date","orders","revenue","delivered","cancelled"])
+    products=tbl(report["top_products"],["product","code","quantity","sales"])
+    return HTMLResponse(f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Analytics · Replau</title><style>
+body{{margin:0;background:#0b1120;color:#e5edf7;font-family:Inter,system-ui,sans-serif}}.wrap{{max-width:1450px;margin:auto;padding:22px}}.erp-nav{{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 18px;padding:12px;border:1px solid #334155;border-radius:14px;background:#0b1220}}.erp-nav a,.btn{{color:#fff;background:#1f2937;border:1px solid #475569;border-radius:9px;padding:9px 12px;text-decoration:none;font-weight:700}}.filters,.cards,.grid{{display:grid;gap:12px}}.filters{{grid-template-columns:1fr 1fr auto auto;align-items:end;background:#111827;padding:14px;border-radius:12px}}.cards{{grid-template-columns:repeat(6,1fr);margin:15px 0}}.grid{{grid-template-columns:1fr 1fr}}.card{{background:#111827;border:1px solid #334155;border-radius:12px;padding:16px}}.metric strong{{display:block;color:#a78bfa;font-size:29px;margin-top:7px}}.muted{{color:#94a3b8}}input,button{{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #475569;background:#020617;color:#fff}}button{{background:#6d28d9;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #26364a;text-align:left}}th{{color:#a78bfa}}@media(max-width:950px){{.cards{{grid-template-columns:repeat(3,1fr)}}.grid{{grid-template-columns:1fr}}}}@media(max-width:600px){{.filters,.cards{{grid-template-columns:1fr}}}}@media print{{.erp-nav,.filters,.no-print{{display:none}}body{{background:#fff;color:#000}}.card{{border:1px solid #bbb;background:#fff}}}}</style></head><body><div class="wrap"><h1>Business Intelligence</h1><p class="muted">Read-only management reporting · {esc(r['timezone'])} · synthetic/test orders excluded</p>{erp_nav(req)}
+<form class="filters" method="get"><input type="hidden" name="token" value="{esc(req.query_params.get('token') or '')}"><label>Start<input type="date" name="start" value="{esc(r['start'])}"></label><label>End<input type="date" name="end" value="{esc(r['end'])}"></label><button>Apply range</button><a class="btn" href="{esc(csv_url)}">Export CSV</a></form>
+<div class="cards"><div class="card metric">Revenue<strong>{money(s['revenue'])}</strong></div><div class="card metric">Orders<strong>{s['orders']}</strong></div><div class="card metric">Average ticket<strong>{money(s['average_ticket'])}</strong></div><div class="card metric">Cancellation rate<strong>{s['cancellation_rate_pct']}%</strong></div><div class="card metric">Returning customers<strong>{s['returning_customer_rate_pct']}%</strong></div><div class="card metric">Test rows excluded<strong>{s['excluded_test_orders']}</strong></div></div>
+<div class="grid"><div class="card"><h2>Daily closing trend</h2>{daily}</div><div class="card"><h2>Top products</h2>{products}</div><div class="card"><h2>Operational timing</h2><p>Kitchen P50 / P90: <strong>{esc(op['kitchen_minutes_p50'])} / {esc(op['kitchen_minutes_p90'])} min</strong> ({op['kitchen_samples']} samples)</p><p>Delivery P50 / P90: <strong>{esc(op['delivery_minutes_p50'])} / {esc(op['delivery_minutes_p90'])} min</strong> ({op['delivery_samples']} samples)</p><p>Delivery failures: <strong>{op['failed_deliveries']} ({op['delivery_failure_rate_pct']}%)</strong></p></div><div class="card"><h2>Payment reconciliation</h2><p>Expected: <strong>{money(pay['expected'])}</strong> · received: <strong>{money(pay['received'])}</strong> · refunded: <strong>{money(pay['refunded'])}</strong></p><p>Unreconciled: <strong>{pay['unreconciled_count']} · {money(pay['unreconciled_value'])}</strong></p><p>{count_chips(pay['status_counts'])}</p></div><div class="card"><h2>Payment methods</h2>{count_chips(report['payment_method_counts'])}</div><div class="card"><h2>Order outcomes</h2>{count_chips(report['status_counts'])}</div></div>
+<p class="no-print"><button onclick="window.print()">Print / save daily closing report</button></p></div></body></html>''')
 @app.get("/conversation-requests",response_class=HTMLResponse)
 def conversation_requests_page(req:Request,x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
     auth(req,x_ops_token)

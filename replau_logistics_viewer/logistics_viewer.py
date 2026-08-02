@@ -1745,16 +1745,21 @@ def render_picking_page(data: Dict[str, Any], token: str) -> str:
     pedido_num = esc(order.get("pedido_num"))
     metodo_pago = esc(order.get("metodo_pago"))
     payment_badge = payment_badge_html(order.get("metodo_pago"))
+    progress = data.get("picking_progress") or {}
+    picked = data.get("picking_items") or []
+    picked_by_item = {int(row.get("pedido_item_id") or 0): row for row in picked}
     rows = "".join(
-        f'''<div class="list-item"><label style="display:flex;gap:10px;align-items:flex-start"><input type="checkbox"><span><strong>{esc(item.get("producto_texto"))}</strong><br><span class="tiny">Cant: {esc(item.get("cantidad"))} · Unidad: {esc(item.get("unidad"))} · {money(item.get("total_linea"))}</span></span></label></div>'''
+        f'''<div class="list-item" style="border-left:5px solid {'#22c55e' if picked_by_item.get(int(item.get('id') or 0),{}).get('complete') else '#f59e0b'}"><div style="display:flex;justify-content:space-between;gap:14px"><span><strong>{esc(item.get("producto_texto"))}</strong><br><span class="tiny">Código: {esc(item.get('cdg_prod') or 'asignar barcode')} · Unidad: {esc(item.get("unidad"))}</span></span><strong>{esc(picked_by_item.get(int(item.get('id') or 0),{}).get('scanned_quantity',0))} / {esc(item.get('cantidad'))}</strong></div></div>'''
         for item in items
     ) or '<div class="list-item">Sin items.</div>'
+    complete = bool(progress.get("complete")) and progress.get("status") == "ACTIVE"
+    scan_notice = esc(data.get("scan_notice") or "")
     body = f"""
     <div class="page">
       <div class="topbar">
         <div>
           <h1>Picking · Pedido {pedido_num}</h1>
-          <div class="muted">Checklist rápida para preparar el pedido antes del despacho.</div>
+          <div class="muted">Escaneo obligatorio y control de pedido completo antes del despacho.</div>
         </div>
         <div class="actions">
           {badge_html(order.get('estado'))}
@@ -1781,7 +1786,14 @@ def render_picking_page(data: Dict[str, Any], token: str) -> str:
       {render_order_notes_panel(order)}
 
       <div class="panel priority-orange">
-        <div class="panel-head"><h2>Checklist de picking</h2><div class="panel-sub">Marca visual local para revisar armado, empaques y observaciones.</div></div>
+        <div class="panel-head"><h2>Escáner de picking</h2><div class="panel-sub">Compatible con lectores USB/Bluetooth en modo teclado. Cada lectura valida producto y cantidad.</div></div>
+        {f'<div class="notice">{scan_notice}</div>' if scan_notice else ''}
+        <form method="post" action="/ops/picking/scan" style="display:grid;grid-template-columns:1fr 180px;gap:10px;margin:14px 0">
+          <input type="hidden" name="pedido_num" value="{pedido_num}"><input type="hidden" name="token" value="{esc(token)}">
+          <input id="barcode" name="barcode" autocomplete="off" autofocus required maxlength="120" placeholder="Escanea código de barras…" style="font-size:22px;min-height:58px">
+          <button class="button warn" type="submit">Registrar escaneo</button>
+        </form>
+        <div class="tiny">Progreso: {esc(progress.get('scanned_quantity',0))} / {esc(progress.get('required_quantity',sum(float(i.get('cantidad') or 0) for i in items)))} · Sesión: {esc(progress.get('status') or 'se inicia con el primer escaneo')}</div>
         <div class="list">{rows}</div>
       </div>
 
@@ -1791,9 +1803,10 @@ def render_picking_page(data: Dict[str, Any], token: str) -> str:
           <input type="hidden" name="token" value="{esc(token)}">
           <input type="hidden" name="next_url" value="/ops/picking/{pedido_num}?token={quote(token, safe='')}">
           <button class="button warn" name="estado" value="EN_PREPARACION">Marcar en preparación</button>
-          <button class="button secondary" name="estado" value="DESPACHADO">Preparado / listo para delivery</button>
           <button class="button good" name="estado" value="ANULADO" onclick="return confirm('¿Limpiar este pedido de Picking? Se marcará como ANULADO y saldrá de la cola activa.');">Clear</button>
         </form>
+        <form method="post" action="/ops/picking/complete" style="margin-top:12px"><input type="hidden" name="pedido_num" value="{pedido_num}"><input type="hidden" name="token" value="{esc(token)}"><button class="button good" {'disabled' if not complete else ''}>Confirmar pedido completo, descontar stock y enviar a Delivery</button></form>
+        <div class="tiny">La base de datos bloquea esta acción hasta que todas las cantidades estén escaneadas. El descuento de stock y el cierre de picking ocurren en una sola transacción.</div>
       </div>
 
       <div class="panel" id="items">
@@ -3157,6 +3170,13 @@ def fetch_public_order(pedido_num: str, token: str) -> Dict[str, Any]:
             order["payment_fulfillment"] = fetch_payment_fulfillment(pedido_id)
         except Exception:
             order["payment_fulfillment"] = None
+        try:
+            progress = pg_get(f"/v_picking_progress?pedido_id=eq.{int(pedido_id)}&order=session_id.desc&limit=1")
+            data["picking_progress"] = progress[0] if progress else None
+            session_id = (data["picking_progress"] or {}).get("session_id")
+            data["picking_items"] = pg_get(f"/v_picking_item_progress?session_id=eq.{int(session_id)}&order=picking_item_id.asc") if session_id else []
+        except Exception:
+            data["picking_progress"], data["picking_items"] = None, []
         data["order"] = order
     return data
 
@@ -3438,11 +3458,12 @@ def picking_station_page(limit: int = Query(100, ge=1, le=250)) -> HTMLResponse:
 
 
 @app.get("/ops/picking/{pedido_num}", response_class=HTMLResponse)
-def picking_page(pedido_num: str, token: str = Query(...)) -> HTMLResponse:
+def picking_page(pedido_num: str, token: str = Query(...), scan_notice: str = Query("")) -> HTMLResponse:
     try:
         data = fetch_public_order(pedido_num, token)
     except requests.HTTPError as exc:
         raise HTTPException(status_code=500, detail=exc.response.text)
+    data["scan_notice"] = scan_notice[:160]
     return HTMLResponse(render_picking_page(data, token))
 
 
@@ -3634,20 +3655,40 @@ def picking_handoff_delivery(
     if not payment_dispatch_allowed(order):
         raise HTTPException(status_code=409, detail=payment_gate_reason(order))
 
-    result = pg_rpc(
-        "actualizar_estado_pedido_publico",
-        {
-            "p_pedido_num": pedido_num,
-            "p_token": token,
-            "p_estado": "DESPACHADO",
-        },
-    )
+    try:
+        result = pg_rpc("complete_scanner_picking", {"p_pedido_num":pedido_num,"p_token":token,"p_operator":"picking-handoff"})
+    except requests.HTTPError as exc:
+        raise HTTPException(status_code=409, detail=exc.response.text)
     if not result.get("ok"):
         raise HTTPException(status_code=403, detail=result)
 
     # Assignment repeats its own payment and active-driver checks. If it fails,
     # the dispatched order remains visible in Delivery's matching queue.
     return delivery_assign_driver(pedido_num=pedido_num, repartidor_id=repartidor_id)
+
+
+@app.post("/ops/picking/scan")
+def picking_scan(pedido_num: str=Form(...),token: str=Form(...),barcode: str=Form(...)) -> RedirectResponse:
+    try:
+        result=pg_rpc("scan_picking_barcode",{"p_pedido_num":pedido_num,"p_token":token,"p_barcode":barcode,"p_operator":"picking-scanner"})
+    except requests.HTTPError as exc:
+        raise HTTPException(status_code=409,detail=exc.response.text)
+    reason=str(result.get("reason") or "SCAN_REJECTED")
+    notice="Escaneo aceptado" if result.get("ok") else {"UNKNOWN_BARCODE":"Código desconocido","NOT_IN_ORDER":"Producto no pertenece al pedido","OVER_PICK":"Cantidad completa; no escanear más"}.get(reason,reason)
+    target=f"/ops/picking/{quote(pedido_num,safe='')}?token={quote(token,safe='')}&scan_notice={quote(notice,safe='')}"
+    return RedirectResponse(url=target,status_code=303)
+
+
+@app.post("/ops/picking/complete")
+def picking_complete(pedido_num: str=Form(...),token: str=Form(...)) -> RedirectResponse:
+    order=(fetch_public_order(pedido_num,token).get("order") or {})
+    if not payment_dispatch_allowed(order): raise HTTPException(status_code=409,detail=payment_gate_reason(order))
+    try:
+        result=pg_rpc("complete_scanner_picking",{"p_pedido_num":pedido_num,"p_token":token,"p_operator":"picking-scanner"})
+    except requests.HTTPError as exc:
+        raise HTTPException(status_code=409,detail=exc.response.text)
+    if not result.get("ok"): raise HTTPException(status_code=409,detail=result)
+    return RedirectResponse(url=f"/ops/delivery/{quote(pedido_num,safe='')}?token={quote(token,safe='')}",status_code=303)
 
 
 @app.post("/ops/delivery/transition")
@@ -3934,14 +3975,13 @@ def update_status(
         raise HTTPException(status_code=409, detail=payment_gate_reason(order))
     if target_status == "ENTREGADO" and not payment_delivery_completion_allowed(order):
         raise HTTPException(status_code=409, detail=payment_gate_reason(order, completing=True))
-    data = pg_rpc(
-        "actualizar_estado_pedido_publico",
-        {
-            "p_pedido_num": pedido_num,
-            "p_token": token,
-            "p_estado": target_status,
-        },
-    )
+    try:
+        if target_status == "DESPACHADO":
+            data = pg_rpc("complete_scanner_picking", {"p_pedido_num":pedido_num,"p_token":token,"p_operator":"picking-status"})
+        else:
+            data = pg_rpc("actualizar_estado_pedido_publico", {"p_pedido_num":pedido_num,"p_token":token,"p_estado":target_status})
+    except requests.HTTPError as exc:
+        raise HTTPException(status_code=409 if target_status=="DESPACHADO" else 403,detail=exc.response.text)
 
     if not data.get("ok"):
         raise HTTPException(status_code=403, detail=data)

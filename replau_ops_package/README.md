@@ -8,6 +8,12 @@ Adds:
 4. WhatsApp gateway watchdog with systemd timer
 5. WhatsApp conversation-request privacy retention with a daily user timer
 5. Private, token-protected list of user-initiated WhatsApp conversation requests
+6. Read-only business intelligence, CSV export, and printable daily closing reports
+
+The protected `/analytics` workspace provides date-range sales, average ticket,
+product performance, hourly demand, cancellations, returning customers,
+kitchen/delivery timing percentiles, and payment reconciliation. It uses
+`BUSINESS_TZ` and excludes known synthetic and contract-test orders.
 
 ## Install
 
