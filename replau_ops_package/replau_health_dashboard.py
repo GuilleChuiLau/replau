@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import html, json, os, secrets, socket, subprocess
+import html, ipaddress, json, os, secrets, socket, subprocess
 from collections import Counter, defaultdict
 from pathlib import Path
 from datetime import datetime, time, timezone
@@ -78,6 +78,22 @@ def business_day_window():
 def auth(req:Request,t:Optional[str]):
     if REQUIRE_OPS_TOKEN and not (t==OPS_TOKEN or req.query_params.get("token")==OPS_TOKEN):
         raise HTTPException(401,"Invalid or missing ops token")
+def analytics_auth(req:Request,t:Optional[str]):
+    if not REQUIRE_OPS_TOKEN or t==OPS_TOKEN or req.query_params.get("token")==OPS_TOKEN:
+        return
+    # Tailscale Serve preserves the authenticated peer's CGNAT tailnet IP on
+    # this host. The service itself remains loopback-bound, so this path is
+    # reachable only through Serve; direct localhost/API access keeps its token.
+    peer=req.client.host if req.client else ""
+    login=req.headers.get("tailscale-user-login","").strip()
+    if peer in {"127.0.0.1","::1"} and login:
+        return
+    try:
+        if ipaddress.ip_address(peer) in ipaddress.ip_network("100.64.0.0/10"):
+            return
+    except ValueError:
+        pass
+    raise HTTPException(401,"Invalid or missing ops token")
 def token_query(req:Request):
     token=req.query_params.get("token")
     if REQUIRE_OPS_TOKEN and token==OPS_TOKEN:
@@ -614,12 +630,12 @@ def api_business_summary(req:Request,x_ops_token:Optional[str]=Header(default=No
     auth(req,x_ops_token); return business_summary()
 @app.get("/api/analytics")
 def api_analytics(req:Request,start:str="",end:str="",x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
-    auth(req,x_ops_token)
+    analytics_auth(req,x_ops_token)
     try: return fetch_report(pg,start,end,BUSINESS_TZ)
     except ValueError as e: raise HTTPException(400,str(e))
 @app.get("/api/analytics.csv")
 def api_analytics_csv(req:Request,start:str="",end:str="",x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
-    auth(req,x_ops_token)
+    analytics_auth(req,x_ops_token)
     try: report=fetch_report(pg,start,end,BUSINESS_TZ)
     except ValueError as e: raise HTTPException(400,str(e))
     if not report.get("ok"): raise HTTPException(502,report.get("error") or "Analytics unavailable")
@@ -801,7 +817,7 @@ def inbox_reply_form(row,req,templates):
     return f'''<div class="reply-box"><h3>Reply on WhatsApp</h3><form class="reply-form" method="post" action="/api/conversation-requests/{rid}/reply{token_query(req)}"><input type="hidden" name="idempotency_key" value="{esc(key)}"><label>Operator<input name="actor" value="{esc(row.get('assigned_to') or 'ops-dashboard')}" maxlength="80" required></label><label>Canned reply<select onchange="if(this.value) this.form.message_text.value=this.value">{options}</select></label><label class="full">Message preview<textarea name="message_text" maxlength="2000" required placeholder="Write the exact message the customer will receive"></textarea></label><button type="submit"{disabled}>Previewed — queue reply</button></form><p class="muted">Duplicate-safe delivery through the WhatsApp outbox. Blocked conversations cannot be replied to.</p></div>'''
 @app.get("/analytics",response_class=HTMLResponse)
 def analytics_page(req:Request,start:str="",end:str="",x_ops_token:Optional[str]=Header(default=None,alias="X-Ops-Token")):
-    auth(req,x_ops_token)
+    analytics_auth(req,x_ops_token)
     try: report=fetch_report(pg,start,end,BUSINESS_TZ)
     except ValueError as e: raise HTTPException(400,str(e))
     if not report.get("ok"): raise HTTPException(502,report.get("error") or "Analytics unavailable")
