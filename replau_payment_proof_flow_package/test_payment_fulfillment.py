@@ -82,6 +82,17 @@ class PaymentFulfillmentMigrationTests(unittest.TestCase):
         ):
             self.assertIn(marker, UI)
 
+    def test_cashier_order_links_use_private_logistics_route(self) -> None:
+        for marker in (
+            'def staff_order_url(',
+            'def staff_order_urls(',
+            'LOGISTICS_BASE_URL = os.environ.get(',
+            '/order/{quote(pedido_num',
+            'Open order in Logistics',
+        ):
+            self.assertIn(marker, UI)
+        self.assertNotIn('href="https://orders.replau.com/order/', UI)
+
 
 if __name__ == "__main__":
     unittest.main()

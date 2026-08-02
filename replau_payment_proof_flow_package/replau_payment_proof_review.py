@@ -6,7 +6,7 @@ import mimetypes
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 import requests
 from fastapi import FastAPI, Form, Header, HTTPException, Request
@@ -18,6 +18,7 @@ POSTGREST_BASE_URL = os.environ.get("POSTGREST_BASE_URL", "http://127.0.0.1:3000
 APP_HOST = os.environ.get("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.environ.get("APP_PORT", "8795"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "10"))
+LOGISTICS_BASE_URL = os.environ.get("LOGISTICS_BASE_URL", "http://127.0.0.1:8790").rstrip("/")
 REQUIRE_REVIEW_TOKEN = os.environ.get("REQUIRE_REVIEW_TOKEN", "false").lower() == "true"
 REVIEW_TOKEN = os.environ.get("REVIEW_TOKEN", "").strip()
 PAYMENT_RECEIPT_DIR = Path(os.environ.get("PAYMENT_RECEIPT_DIR", "/home/guill/.openclaw/workspace/replau_payment_receipts")).resolve()
@@ -120,6 +121,29 @@ def pg_rpc(name: str, payload: Dict[str, Any]) -> Any:
     )
     r.raise_for_status()
     return r.json()
+
+
+def staff_order_url(order: Dict[str, Any]) -> str:
+    """Build a private Logistics detail URL from the order's existing token."""
+    pedido_num = str(order.get("pedido_num") or "").strip()
+    public_url = str(order.get("order_url") or "").strip()
+    if not pedido_num or not public_url:
+        return ""
+    try:
+        token = (parse_qs(urlparse(public_url).query).get("token") or [""])[0]
+    except Exception:
+        token = ""
+    if not token:
+        return ""
+    return f"{LOGISTICS_BASE_URL}/order/{quote(pedido_num, safe='')}?token={quote(token, safe='')}"
+
+
+def staff_order_urls(pedido_ids: list[Any]) -> Dict[int, str]:
+    ids = sorted({int(value) for value in pedido_ids if value is not None})
+    if not ids:
+        return {}
+    rows = pg_get(f"/pedidos?id=in.({','.join(str(value) for value in ids)})&select=id,pedido_num,order_url")
+    return {int(row["id"]): staff_order_url(row) for row in rows if row.get("id") is not None and staff_order_url(row)}
 
 
 def layout(title: str, body: str, flash: str = "", auth_query: str = "") -> HTMLResponse:
@@ -459,12 +483,14 @@ def index(request: Request, status: str = "ALL", flash: str = "", x_review_token
     pending_value = sum(float(r.get("total") or 0) for r in received)
     fulfillment_rows = pg_get("/v_payment_fulfillments?select=pedido_id,status,version&limit=1000")
     fulfillment_by_order = {int(r["pedido_id"]): r for r in fulfillment_rows if r.get("pedido_id") is not None}
+    order_urls = staff_order_urls([r.get("pedido_id") for r in rows])
     auth_suffix = ("&" + token_query(request)[1:]) if token_query(request) else ""
 
     tr = ""
     for r in rows:
         st = esc(r.get("status"))
         proof_id = r.get("id")
+        order_url = order_urls.get(int(r.get("pedido_id") or 0), "")
         fulfillment = fulfillment_by_order.get(int(r.get("pedido_id") or 0), {})
         saved_file_action = (
             f'<a href="{esc(proof_view_link(proof_id, request))}" target="_blank">View submitted file</a>'
@@ -474,7 +500,7 @@ def index(request: Request, status: str = "ALL", flash: str = "", x_review_token
         tr += f"""
         <tr>
           <td>{esc(proof_id)}</td>
-          <td><strong>{esc(r.get('pedido_num'))}</strong><br><span class="muted">pedido_id={esc(r.get('pedido_id'))}</span></td>
+          <td><strong>{f'<a href="{esc(order_url)}" target="_blank">{esc(r.get("pedido_num"))}</a>' if order_url else esc(r.get('pedido_num'))}</strong><br><span class="muted">pedido_id={esc(r.get('pedido_id'))}</span></td>
           <td>{esc(r.get('cliente_nombre'))}<br>{esc(r.get('whatsapp_number'))}</td>
           <td>S/ {esc(r.get('total'))}<br><span class="muted">{esc(r.get('payment_status'))}</span><br>{fulfillment_badge(fulfillment.get('status'))}</td>
           <td>{media_html(r)}<br><span class="muted">{esc(r.get('caption'))}</span></td>
@@ -558,6 +584,7 @@ def proof_detail(proof_id: int, request: Request, flash: str = "", x_review_toke
     if not rows:
         raise HTTPException(status_code=404, detail="Proof not found")
     r = rows[0]
+    order_url = staff_order_urls([r.get("pedido_id")]).get(int(r.get("pedido_id") or 0), "")
     ocr_html = '<div class="warning">No hay un archivo local disponible para analizar.</div>'
     ocr_analysis_id: Optional[int] = None
     ocr_analysis_version: Optional[int] = None
@@ -607,7 +634,7 @@ def proof_detail(proof_id: int, request: Request, flash: str = "", x_review_toke
     <div class="grid">
       <div class="card">
         <h2>Proof #{esc(r.get('id'))}</h2>
-        <p><strong>Order:</strong> {esc(r.get('pedido_num'))} / pedido_id={esc(r.get('pedido_id'))}</p>
+        <p><strong>Order:</strong> {f'<a href="{esc(order_url)}" target="_blank">{esc(r.get("pedido_num"))}</a>' if order_url else esc(r.get('pedido_num'))} / pedido_id={esc(r.get('pedido_id'))}</p>
         <p><strong>Customer:</strong> {esc(r.get('cliente_nombre'))} / {esc(r.get('whatsapp_number'))}</p>
         <p><strong>Total:</strong> S/ {esc(r.get('total'))}</p>
         <p><strong>Payment status:</strong> {esc(r.get('payment_status'))}</p>
@@ -665,6 +692,7 @@ def fulfillment_detail(pedido_id: int, request: Request, flash: str = "", x_revi
     if not row:
         raise HTTPException(status_code=404, detail="Payment fulfillment not found")
     events = get_fulfillment_events(pedido_id)
+    order_url = staff_order_urls([pedido_id]).get(pedido_id, "")
     actions = fulfillment_actions(row.get("status"))
     action_forms = ""
     for target, label in actions:
@@ -688,6 +716,7 @@ def fulfillment_detail(pedido_id: int, request: Request, flash: str = "", x_revi
     body = f"""
       <div class="card">
         <h2>{esc(row.get('pedido_num'))} · Payment fulfillment</h2>
+        {f'<p><a href="{esc(order_url)}" target="_blank">Open order in Logistics</a></p>' if order_url else ''}
         <div class="kpi-grid">
           <div class="kpi"><span>Status</span><strong style="font-size:18px">{fulfillment_badge(row.get('status'))}</strong></div>
           <div class="kpi"><span>Expected</span><strong>{money(row.get('expected_amount'))}</strong></div>
