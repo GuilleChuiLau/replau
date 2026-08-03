@@ -127,7 +127,7 @@ CREATE OR REPLACE FUNCTION api.post_ingredient_waste(p_ingredient_id integer,p_w
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=api,public AS $$
 BEGIN
  IF upper(trim(COALESCE(p_reason_code,''))) NOT IN('SPOILAGE','PREP_LOSS','DAMAGE','EXPIRED','QUALITY','OTHER') THEN RAISE EXCEPTION 'Invalid waste reason code';END IF;
- RETURN api.post_ingredient_movement(p_ingredient_id,p_warehouse_id,'WASTE',p_quantity_kg,p_actor,p_reason,upper(trim(p_reason_code)),NULL,'PEN',NULL,NULL,NULL,NULL,'INGREDIENT_WASTE',NULL,NULL,NULL);
+ RETURN api.post_ingredient_movement(p_ingredient_id,p_warehouse_id,'WASTE',p_quantity_kg,p_actor,p_reason,upper(trim(p_reason_code)),NULL,'PEN',NULL,NULL,NULL,'INGREDIENT_WASTE',NULL,NULL,NULL);
 END $$;
 
 INSERT INTO api.ingredient_stock_movements(movement_type,warehouse_id,ingredient_id,quantity_kg,unit_cost,currency,doc_type,reference,reason,actor)

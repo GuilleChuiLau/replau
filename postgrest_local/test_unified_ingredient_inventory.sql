@@ -16,8 +16,8 @@ BEGIN
  IF (result->>'stock_kg')::numeric<>10 THEN RAISE EXCEPTION 'Ingredient receipt failed: %',result;END IF;
  IF (SELECT costo_kg FROM api.ingredientes_costeo WHERE id=ingredient_id)<>20 THEN RAISE EXCEPTION 'Weighted cost update failed';END IF;
  PERFORM api.post_ingredient_waste(ingredient_id,warehouse_id,1,'contract-kitchen','SPOILAGE','Rollback waste test');
- PERFORM api.post_ingredient_movement(ingredient_id,warehouse_id,'ADJUST_NEGATIVE',1,'contract-manager','Rollback negative correction','COUNT_VARIANCE',NULL,'PEN',NULL,NULL,NULL,NULL,'CONTRACT_TEST',NULL,NULL,NULL);
- PERFORM api.post_ingredient_movement(ingredient_id,warehouse_id,'ADJUST_POSITIVE',0.5,'contract-manager','Rollback positive correction','COUNT_VARIANCE',NULL,'PEN',NULL,NULL,NULL,NULL,'CONTRACT_TEST',NULL,NULL,NULL);
+ PERFORM api.post_ingredient_movement(ingredient_id,warehouse_id,'ADJUST_NEGATIVE',1,'contract-manager','Rollback negative correction','COUNT_VARIANCE',NULL,'PEN',NULL,NULL,NULL,'CONTRACT_TEST',NULL,NULL,NULL);
+ PERFORM api.post_ingredient_movement(ingredient_id,warehouse_id,'ADJUST_POSITIVE',0.5,'contract-manager','Rollback positive correction','COUNT_VARIANCE',NULL,'PEN',NULL,NULL,NULL,'CONTRACT_TEST',NULL,NULL,NULL);
  stock_qty:=api.ingredient_stock_quantity(warehouse_id,ingredient_id);
  IF stock_qty<>8.5 THEN RAISE EXCEPTION 'Expected ingredient stock 8.5, got %',stock_qty;END IF;
  UPDATE api.ingredientes_costeo SET inventory_enforced=true WHERE id=ingredient_id;
