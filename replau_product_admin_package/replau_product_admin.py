@@ -123,6 +123,7 @@ def erp_nav(auth_query: str = "") -> str:
         <a href="/costs{auth_query}">Costs</a>
         <a href="/barcodes{auth_query}">Barcodes</a>
         <a href="/receiving{auth_query}">Receiving</a>
+        <a href="/procurement{auth_query}">Procurement</a>
         <a href="/menu" target="_blank">Public Menu</a>
       </div>
     """
@@ -1036,6 +1037,7 @@ def html_page(title: str, body: str, flash: str = "", auth_query: str = "") -> H
         <a href="/costs{auth_query}">Recipe Costs</a>
         <a href="/barcodes{auth_query}">Barcodes</a>
         <a href="/receiving{auth_query}">Receiving</a>
+        <a href="/procurement{auth_query}">Procurement</a>
         <a href="/bulk{auth_query}">Bulk CSV</a>
         <a href="/menu" target="_blank">Public Menu</a>
         <a href="/health{auth_query}">Health</a>
@@ -1801,6 +1803,84 @@ def create_product(request: Request, code: str = Form(...), name: str = Form(...
     return RedirectResponse(url=with_token("/?flash=Product+saved", request), status_code=303)
 
 
+@app.get("/procurement",response_class=HTMLResponse)
+def procurement_page(request:Request,flash:str="",x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> HTMLResponse:
+    check_auth(request,x_admin_token)
+    suppliers=pg_get("/proveedores?select=*&order=nombre.asc&limit=500")
+    orders=pg_get("/v_ordenes_compra_resumen?select=*&order=id.desc&limit=200")
+    catalog=pg_get("/supplier_product_catalog?select=*&order=supplier_id.asc,product_id.asc&limit=2000")
+    products_map=product_lookup();products_all=get_products(active_filter="true");pcols=product_columns()
+    supplier_options="".join(f'<option value="{int(s["id"])}">{esc(s.get("nombre"))}</option>' for s in suppliers if s.get("active"))
+    product_select="".join(f'<option value="{int(p["id"])}">{esc(get_product_code(p,pcols))} · {esc(get_product_name(p,pcols))}</option>' for p in products_all)
+    supplier_map={str(s.get("id")):str(s.get("nombre")) for s in suppliers}
+    catalog_rows="".join(f'''<tr><td>{esc(supplier_map.get(str(c.get('supplier_id'))))}</td><td>{esc(products_map.get(str(c.get('product_id'))))}</td><td>{esc(c.get('packaging_level'))} × {esc(c.get('unit_factor'))}</td><td>{esc(c.get('unit_price'))} {esc(c.get('currency'))}</td><td>{esc(c.get('minimum_order_quantity'))}</td><td>{esc(c.get('lead_time_days'))}</td></tr>''' for c in catalog if c.get("active"))
+    order_rows="".join(f'''<tr><td><a href="/procurement/order/{int(o['id'])}{token_query(request)}"><strong>{esc(o.get('num_ocom'))}</strong></a></td><td>{esc(o.get('proveedor_nombre'))}</td><td>{esc(o.get('estado'))}</td><td>{esc(o.get('fecha_entrega'))}</td><td>{esc(o.get('total_lineas'))}</td><td>{esc(o.get('total_cantidad_pedida'))}</td><td>{esc(o.get('total_cantidad_recibida'))}</td><td>S/ {float(o.get('subtotal') or 0):,.2f}</td></tr>''' for o in orders)
+    supplier_rows="".join(f'''<tr><td><strong>{esc(s.get('nombre'))}</strong><br><span class="muted">{esc(s.get('ruc_sunat') or s.get('ruc_prv_internal'))}</span></td><td>{esc(s.get('contact_name'))}<br>{esc(s.get('email'))} · {esc(s.get('telefono'))}</td><td>{esc(s.get('payment_terms_days'))} days</td><td>{esc(s.get('lead_time_days'))} days</td><td>{'Active' if s.get('active') else 'Inactive'}</td></tr>''' for s in suppliers)
+    body=f'''<div class="card"><h2>Procurement control</h2><p class="muted">Draft → Approved → Sent → Partial/Closed. Approval and sending are version-checked and audited.</p><div class="grid2"><form method="post" action="/procurement/order{token_query(request)}"><h3>Create purchase order</h3><label>Supplier</label><select name="supplier_id">{supplier_options}</select><label>Expected delivery</label><input type="date" name="delivery_date"><label>Currency</label><select name="currency"><option>PEN</option><option>USD</option><option>EUR</option></select><label>Buyer</label><input name="actor" value="procurement" required><label>Notes</label><input name="notes"><br><br><button>Create draft PO</button></form><form method="post" action="/procurement/low-stock-draft{token_query(request)}"><h3>Low-stock draft</h3><p class="muted">Uses supplier-product mappings, minimum stock, current stock, pack factor, price, and minimum order quantity.</p><label>Supplier</label><select name="supplier_id">{supplier_options}</select><label>Buyer</label><input name="actor" value="procurement" required><br><br><button>Create recommended draft</button></form></div></div><div class="card"><h2>Purchase orders</h2><table><thead><tr><th>PO</th><th>Supplier</th><th>Status</th><th>Delivery</th><th>Lines</th><th>Ordered</th><th>Received</th><th>Subtotal</th></tr></thead><tbody>{order_rows or '<tr><td colspan="8">No purchase orders.</td></tr>'}</tbody></table></div><div class="card"><h2>Supplier product terms</h2><form method="post" action="/procurement/catalog{token_query(request)}"><div class="grid"><div><label>Supplier</label><select name="supplier_id">{supplier_options}</select></div><div><label>Product</label><select name="product_id">{product_select}</select></div><div><label>Packaging</label><select name="packaging_level"><option>UNIT</option><option>PACK</option><option>CASE</option><option>PALLET</option></select></div><div><label>Units/pack</label><input type="number" name="unit_factor" min="0.001" step="0.001" value="1"></div><div><label>Unit price</label><input type="number" name="unit_price" min="0" step="0.0001" value="0"></div><div><label>Currency</label><select name="currency"><option>PEN</option><option>USD</option><option>EUR</option></select></div><div><label>Minimum order</label><input type="number" name="minimum_order_quantity" min="0.001" step="0.001" value="1"></div><div><label>Lead time days</label><input type="number" name="lead_time_days" min="0" value="0"></div></div><br><button>Save supplier terms</button></form><table><thead><tr><th>Supplier</th><th>Product</th><th>Pack</th><th>Price</th><th>MOQ</th><th>Lead time</th></tr></thead><tbody>{catalog_rows or '<tr><td colspan="6">No mappings.</td></tr>'}</tbody></table></div><div class="card"><h2>Suppliers</h2><form method="post" action="/procurement/supplier{token_query(request)}"><div class="grid"><div><label>Name</label><input name="name" required></div><div><label>RUC</label><input name="ruc" maxlength="11"></div><div><label>Contact</label><input name="contact_name"></div><div><label>Email</label><input type="email" name="email"></div><div><label>Phone</label><input name="phone"></div><div><label>Payment terms days</label><input type="number" name="payment_terms_days" min="0" value="0"></div><div><label>Lead-time days</label><input type="number" name="lead_time_days" min="0" value="0"></div><div><label>Address</label><input name="address"></div></div><br><button>Add supplier</button></form><table><thead><tr><th>Supplier</th><th>Contact</th><th>Terms</th><th>Lead time</th><th>Status</th></tr></thead><tbody>{supplier_rows}</tbody></table></div>'''
+    return html_page("Procurement",body,flash=flash,auth_query=token_query(request))
+
+
+@app.post("/procurement/supplier")
+def procurement_supplier(request:Request,name:str=Form(...),ruc:str=Form(""),contact_name:str=Form(""),email:str=Form(""),phone:str=Form(""),payment_terms_days:int=Form(0),lead_time_days:int=Form(0),address:str=Form(""),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    payload={"nombre":name.strip(),"ruc_sunat":ruc.strip() or None,"contact_name":contact_name.strip() or None,"email":email.strip() or None,"telefono":phone.strip() or None,"payment_terms_days":payment_terms_days,"lead_time_days":lead_time_days,"direccion":address.strip() or None,"active":True}
+    pg_post("/proveedores",payload);return RedirectResponse(with_token("/procurement?flash=Supplier+added",request),303)
+
+
+@app.post("/procurement/order")
+def procurement_order_create(request:Request,supplier_id:int=Form(...),delivery_date:str=Form(""),currency:str=Form("PEN"),actor:str=Form("procurement"),notes:str=Form(""),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token);due=date.fromisoformat(delivery_date).isoformat() if delivery_date else None
+    result=pg_rpc("create_purchase_order",{"p_supplier_id":supplier_id,"p_delivery_date":due,"p_currency":currency,"p_actor":actor,"p_notes":notes or None})
+    return RedirectResponse(with_token(f"/procurement/order/{int(result['order_id'])}?flash=Draft+created",request),303)
+
+
+@app.post("/procurement/catalog")
+def procurement_catalog(request:Request,supplier_id:int=Form(...),product_id:int=Form(...),packaging_level:str=Form("UNIT"),unit_factor:float=Form(1),unit_price:float=Form(0),currency:str=Form("PEN"),minimum_order_quantity:float=Form(1),lead_time_days:int=Form(0),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    existing=pg_get(f"/supplier_product_catalog?supplier_id=eq.{supplier_id}&product_id=eq.{product_id}&packaging_level=eq.{quote(packaging_level.upper(),safe='')}&select=id&limit=1")
+    payload={"supplier_id":supplier_id,"product_id":product_id,"packaging_level":packaging_level.upper(),"unit_factor":unit_factor,"unit_price":unit_price,"currency":currency.upper(),"minimum_order_quantity":minimum_order_quantity,"lead_time_days":lead_time_days,"active":True}
+    pg_patch(f"/supplier_product_catalog?id=eq.{int(existing[0]['id'])}",payload) if existing else pg_post("/supplier_product_catalog",payload)
+    return RedirectResponse(with_token("/procurement?flash=Supplier+terms+saved",request),303)
+
+
+@app.post("/procurement/low-stock-draft")
+def procurement_low_stock(request:Request,supplier_id:int=Form(...),actor:str=Form("procurement"),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token);result=pg_rpc("create_low_stock_draft",{"p_supplier_id":supplier_id,"p_actor":actor})
+    return RedirectResponse(with_token(f"/procurement/order/{int(result['order_id'])}?flash=Recommended+draft+created",request),303)
+
+
+@app.get("/procurement/order/{order_id}",response_class=HTMLResponse)
+def procurement_order_detail(order_id:int,request:Request,flash:str="",x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> HTMLResponse:
+    check_auth(request,x_admin_token)
+    orders=pg_get(f"/ordenes_compra?id=eq.{order_id}&select=*&limit=1")
+    if not orders: raise HTTPException(404,"Purchase order not found")
+    order=orders[0];lines=pg_get(f"/v_purchase_order_variance?orden_id=eq.{order_id}&select=*&order=line_id.asc")
+    events=pg_get(f"/purchase_order_events?order_id=eq.{order_id}&select=*&order=id.desc&limit=100")
+    products=get_products(active_filter="true");cols=product_columns();product_options_html="".join(f'<option value="{int(p["id"])}">{esc(get_product_code(p,cols))} · {esc(get_product_name(p,cols))}</option>' for p in products)
+    line_rows="".join(f'''<tr><td>{esc(l.get('product_name'))}</td><td>{esc(l.get('cantidad_pedida'))}</td><td>{esc(l.get('cantidad_recibida'))}</td><td>{esc(l.get('quantity_variance'))}</td><td>{float(l.get('precio_unitario') or 0):.4f}</td><td>{float(l.get('catalog_price') or 0):.4f}</td><td>{float(l.get('price_variance') or 0):.4f}</td></tr>''' for l in lines)
+    event_rows="".join(f'''<tr><td>{esc(e.get('created_at'))}</td><td>{esc(e.get('event_type'))}</td><td>{esc(e.get('actor'))}</td><td>{esc(e.get('from_status'))} → {esc(e.get('to_status'))}</td><td>{esc(e.get('details'))}</td></tr>''' for e in events)
+    draft=order.get("estado")=="BORRADOR";version=int(order.get("version") or 1)
+    actions=[]
+    if draft: actions.append(f'<form method="post" action="/procurement/order/{order_id}/transition{token_query(request)}"><input type="hidden" name="action" value="APPROVE"><input type="hidden" name="expected_version" value="{version}"><input name="actor" value="manager" required><button>Approve PO</button></form>')
+    if order.get("estado")=="APROBADA": actions.append(f'<form method="post" action="/procurement/order/{order_id}/transition{token_query(request)}"><input type="hidden" name="action" value="SEND"><input type="hidden" name="expected_version" value="{version}"><input name="actor" value="procurement" required><button>Mark sent</button></form>')
+    if order.get("estado") in {"BORRADOR","APROBADA","ENVIADA","ABIERTA","PARCIAL"}: actions.append(f'<form method="post" action="/procurement/order/{order_id}/transition{token_query(request)}"><input type="hidden" name="action" value="CANCEL"><input type="hidden" name="expected_version" value="{version}"><input name="actor" value="manager" required><input name="reason" minlength="5" placeholder="Cancellation reason" required><button class="secondary">Cancel PO</button></form>')
+    add_form=f'''<div class="card"><h2>Add line</h2><form method="post" action="/procurement/order/{order_id}/line{token_query(request)}"><div class="grid"><div><label>Product</label><select name="product_id">{product_options_html}</select></div><div><label>Quantity</label><input type="number" name="quantity" min="0.001" step="0.001" required></div><div><label>Unit price</label><input type="number" name="unit_price" min="0" step="0.0001" required></div><div><label>Actor</label><input name="actor" value="procurement"></div></div><br><button>Add line</button></form></div>''' if draft else ''
+    body=f'''<div class="card"><h2>{esc(order.get('num_ocom'))} · {esc(order.get('estado'))}</h2><p>Delivery {esc(order.get('fecha_entrega'))} · Currency {esc(order.get('moneda'))} · Version {version}</p><div class="quick-actions">{''.join(actions)}{f'<a href="{esc(with_token(f"/receiving?purchase_order_id={order_id}",request))}">Receive against this PO</a>' if order.get('estado') in {'ENVIADA','ABIERTA','PARCIAL'} else ''}</div></div>{add_form}<div class="card"><h2>Lines and variance</h2><table><thead><tr><th>Product</th><th>Ordered</th><th>Received</th><th>Qty variance</th><th>PO price</th><th>Catalog</th><th>Price variance</th></tr></thead><tbody>{line_rows or '<tr><td colspan="7">No lines.</td></tr>'}</tbody></table></div><div class="card"><h2>Audit timeline</h2><table><thead><tr><th>Time</th><th>Event</th><th>Actor</th><th>State</th><th>Details</th></tr></thead><tbody>{event_rows}</tbody></table></div>'''
+    return html_page("Purchase Order",body,flash=flash,auth_query=token_query(request))
+
+
+@app.post("/procurement/order/{order_id}/line")
+def procurement_add_line(order_id:int,request:Request,product_id:int=Form(...),quantity:float=Form(...),unit_price:float=Form(...),actor:str=Form("procurement"),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token);pg_rpc("add_purchase_order_line",{"p_order_id":order_id,"p_product_id":product_id,"p_quantity":quantity,"p_unit_price":unit_price,"p_tax":0,"p_discount":0,"p_actor":actor})
+    return RedirectResponse(with_token(f"/procurement/order/{order_id}?flash=Line+added",request),303)
+
+
+@app.post("/procurement/order/{order_id}/transition")
+def procurement_transition(order_id:int,request:Request,action:str=Form(...),expected_version:int=Form(...),actor:str=Form(...),reason:str=Form(""),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token);pg_rpc("transition_purchase_order",{"p_order_id":order_id,"p_action":action,"p_actor":actor,"p_expected_version":expected_version,"p_reason":reason or None})
+    return RedirectResponse(with_token(f"/procurement/order/{order_id}?flash=PO+updated",request),303)
+
+
 @app.get("/barcodes", response_class=HTMLResponse)
 def barcodes_page(request: Request, flash: str="", x_admin_token: Optional[str]=Header(default=None,alias="X-Admin-Token")) -> HTMLResponse:
     check_auth(request,x_admin_token)
@@ -1850,15 +1930,19 @@ def receiving_page(request:Request,flash:str="",x_admin_token:Optional[str]=Head
     check_auth(request,x_admin_token)
     warehouses=pg_get("/almacenes?active=eq.true&select=id,codigo,nombre&order=id.asc")
     sessions=pg_get("/inventory_receiving_sessions?select=*&order=id.desc&limit=100")
+    eligible_pos=pg_get("/v_ordenes_compra_resumen?estado=in.(ENVIADA,ABIERTA,PARCIAL)&select=id,num_ocom,proveedor_nombre,estado&order=id.desc&limit=200")
+    selected_po=str(request.query_params.get("purchase_order_id") or "0")
+    po_options='<option value="0">Standalone / exceptional receipt</option>'+"".join(f'<option value="{int(o["id"])}" {"selected" if str(o["id"])==selected_po else ""}>{esc(o.get("num_ocom"))} · {esc(o.get("proveedor_nombre"))} · {esc(o.get("estado"))}</option>' for o in eligible_pos)
     options="".join(f'<option value="{int(w["id"])}">{esc(w.get("codigo"))} · {esc(w.get("nombre"))}</option>' for w in warehouses)
     rows="".join(f'''<tr><td><a href="/receiving/{int(s['id'])}{token_query(request)}"><strong>{esc(s.get('reference'))}</strong></a></td><td>{esc(s.get('status'))}</td><td>{esc(s.get('supplier_name'))}</td><td>{esc(s.get('operator_name'))}</td><td>{esc(s.get('started_at'))}</td><td>{esc(s.get('posted_at') or s.get('voided_at'))}</td></tr>''' for s in sessions)
-    body=f'''<div class="card"><h2>Start receiving session</h2><p class="muted">Starting a session does not change stock. Stock is added only after an explicit reviewed Post action.</p><form method="post" action="/receiving{token_query(request)}"><div class="grid"><div><label>Warehouse</label><select name="warehouse_id">{options}</select></div><div><label>Operator</label><input name="operator_name" value="inventory" required></div><div><label>Supplier</label><input name="supplier_name"></div><div><label>Notes</label><input name="notes"></div></div><br><button>Start session</button></form></div><div class="card"><h2>Receiving history</h2><table><thead><tr><th>Reference</th><th>Status</th><th>Supplier</th><th>Operator</th><th>Started</th><th>Closed</th></tr></thead><tbody>{rows or '<tr><td colspan="6">No sessions.</td></tr>'}</tbody></table></div>'''
+    body=f'''<div class="card"><h2>Start receiving session</h2><p class="muted">Starting a session does not change stock. Select a sent PO for normal receiving; standalone is reserved for controlled exceptions.</p><form method="post" action="/receiving{token_query(request)}"><label>Purchase order</label><select name="purchase_order_id">{po_options}</select><div class="grid"><div><label>Warehouse</label><select name="warehouse_id">{options}</select></div><div><label>Operator</label><input name="operator_name" value="inventory" required></div><div><label>Supplier (standalone only)</label><input name="supplier_name"></div><div><label>Notes</label><input name="notes"></div></div><br><button>Start session</button></form></div><div class="card"><h2>Receiving history</h2><table><thead><tr><th>Reference</th><th>Status</th><th>Supplier</th><th>Operator</th><th>Started</th><th>Closed</th></tr></thead><tbody>{rows or '<tr><td colspan="6">No sessions.</td></tr>'}</tbody></table></div>'''
     return html_page("Scanner Receiving",body,flash=flash,auth_query=token_query(request))
 
 
 @app.post("/receiving")
-def receiving_create(request:Request,warehouse_id:int=Form(...),operator_name:str=Form(...),supplier_name:str=Form(""),notes:str=Form(""),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
-    check_auth(request,x_admin_token); result=pg_rpc("create_inventory_receiving",{"p_warehouse_id":warehouse_id,"p_operator":operator_name,"p_supplier":supplier_name or None,"p_notes":notes or None})
+def receiving_create(request:Request,purchase_order_id:int=Form(0),warehouse_id:int=Form(...),operator_name:str=Form(...),supplier_name:str=Form(""),notes:str=Form(""),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    result=pg_rpc("create_po_inventory_receiving",{"p_order_id":purchase_order_id,"p_warehouse_id":warehouse_id,"p_operator":operator_name,"p_notes":notes or None}) if purchase_order_id else pg_rpc("create_inventory_receiving",{"p_warehouse_id":warehouse_id,"p_operator":operator_name,"p_supplier":supplier_name or None,"p_notes":notes or None})
     return RedirectResponse(with_token(f"/receiving/{int(result['session_id'])}?flash=Session+started",request),303)
 
 

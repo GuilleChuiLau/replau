@@ -18,6 +18,20 @@ receipt writes compensating `AJUSTE_NEGATIVO` movements and is blocked when that
 stock has already been consumed. Supplier GS1 values must be registered as
 printed; do not invent retail GTINs without an assigned GS1 company prefix.
 
+## Procurement
+
+Apply `postgrest_local/add_procurement_workflow.sql` after the barcode/receiving
+migration. The protected `/procurement` workspace manages suppliers, terms,
+lead times, supplier-product pack/price/MOQ mappings, low-stock draft POs, and
+the versioned `BORRADOR → APROBADA → ENVIADA → PARCIAL/CERRADA` lifecycle.
+Every approval, send, cancellation, and line addition is audited.
+
+Scanner Receiving can be opened from an eligible PO. It rejects products not on
+the order and quantities above the remaining balance. Posting creates the base
+receipt/detail records so existing stock and PO triggers remain authoritative.
+Voiding writes compensating movements, annuls the receipt, and recomputes PO
+quantities; it is blocked after the received lot has been consumed.
+
 ## URL
 
 ```text
