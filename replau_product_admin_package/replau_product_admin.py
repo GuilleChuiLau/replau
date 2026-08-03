@@ -123,6 +123,7 @@ def erp_nav(auth_query: str = "") -> str:
         <a href="/costs{auth_query}">Costs</a>
         <a href="/barcodes{auth_query}">Barcodes</a>
         <a href="/receiving{auth_query}">Receiving</a>
+        <a href="/inventory-counts{auth_query}">Stock Counts</a>
         <a href="/procurement{auth_query}">Procurement</a>
         <a href="/menu" target="_blank">Public Menu</a>
       </div>
@@ -1037,6 +1038,7 @@ def html_page(title: str, body: str, flash: str = "", auth_query: str = "") -> H
         <a href="/costs{auth_query}">Recipe Costs</a>
         <a href="/barcodes{auth_query}">Barcodes</a>
         <a href="/receiving{auth_query}">Receiving</a>
+        <a href="/inventory-counts{auth_query}">Stock Counts</a>
         <a href="/procurement{auth_query}">Procurement</a>
         <a href="/bulk{auth_query}">Bulk CSV</a>
         <a href="/menu" target="_blank">Public Menu</a>
@@ -1983,6 +1985,82 @@ def receiving_post(session_id:int,request:Request,operator_name:str=Form("invent
 def receiving_void(session_id:int,request:Request,operator_name:str=Form("inventory"),reason:str=Form(...),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
     check_auth(request,x_admin_token); pg_rpc("void_inventory_receiving",{"p_session_id":session_id,"p_operator":operator_name,"p_reason":reason})
     return RedirectResponse(with_token(f"/receiving/{session_id}?flash=Receiving+voided",request),303)
+
+
+@app.get("/inventory-counts",response_class=HTMLResponse)
+def inventory_counts_page(request:Request,flash:str="",x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> HTMLResponse:
+    check_auth(request,x_admin_token)
+    warehouses=pg_get("/almacenes?active=eq.true&select=id,codigo,nombre&order=id.asc")
+    sessions=pg_get("/inventory_count_sessions?select=*&order=id.desc&limit=100")
+    warehouse_map={str(w.get("id")):f'{w.get("codigo")} · {w.get("nombre")}' for w in warehouses}
+    warehouse_options="".join(f'<option value="{int(w["id"])}">{esc(w.get("codigo"))} · {esc(w.get("nombre"))}</option>' for w in warehouses)
+    rows="".join(f'''<tr><td><a href="/inventory-counts/{int(s['id'])}{token_query(request)}"><strong>{esc(s.get('reference'))}</strong></a></td><td>{esc(warehouse_map.get(str(s.get('warehouse_id'))))}</td><td>{esc(s.get('count_scope'))}</td><td>{esc(s.get('status'))}</td><td>{esc(s.get('operator_name'))}</td><td>{esc(s.get('started_at'))}</td><td>{esc(s.get('approved_by') or '—')}</td></tr>''' for s in sessions)
+    body=f'''<div class="card"><h2>Start controlled stock count</h2><p class="muted">A full count snapshots every active product and must be completed. A cycle count includes only selected products. Pause receiving and stock consumption while counting.</p><form method="post" action="/inventory-counts{token_query(request)}"><div class="grid"><div><label>Warehouse</label><select name="warehouse_id">{warehouse_options}</select></div><div><label>Scope</label><select name="count_scope"><option>FULL</option><option>CYCLE</option></select></div><div><label>Counter</label><input name="operator_name" value="inventory" required minlength="2"></div><div><label>Notes</label><input name="notes"></div></div><br><button>Start count</button></form></div><div class="card"><h2>Count history</h2><table><thead><tr><th>Reference</th><th>Warehouse</th><th>Scope</th><th>Status</th><th>Counter</th><th>Started</th><th>Approver</th></tr></thead><tbody>{rows or '<tr><td colspan="7">No stock counts.</td></tr>'}</tbody></table></div>'''
+    return html_page("Stock Counts",body,flash=flash,auth_query=token_query(request))
+
+
+@app.post("/inventory-counts")
+def inventory_count_create(request:Request,warehouse_id:int=Form(...),count_scope:str=Form("FULL"),operator_name:str=Form(...),notes:str=Form(""),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    result=pg_rpc("create_inventory_count",{"p_warehouse_id":warehouse_id,"p_scope":count_scope,"p_operator":operator_name,"p_notes":notes or None})
+    return RedirectResponse(with_token(f"/inventory-counts/{int(result['session_id'])}?flash=Count+started",request),303)
+
+
+@app.get("/inventory-counts/{session_id}",response_class=HTMLResponse)
+def inventory_count_detail(session_id:int,request:Request,flash:str="",x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> HTMLResponse:
+    check_auth(request,x_admin_token)
+    sessions=pg_get(f"/inventory_count_sessions?id=eq.{session_id}&select=*&limit=1")
+    if not sessions: raise HTTPException(404,"Inventory count not found")
+    session=sessions[0]
+    lines=pg_get(f"/v_inventory_count_lines?session_id=eq.{session_id}&select=*&order=product_name.asc")
+    events=pg_get(f"/inventory_count_events?session_id=eq.{session_id}&select=*&order=id.desc&limit=200")
+    products=get_products(active_filter="true");cols=product_columns()
+    product_options_html="".join(f'<option value="{int(p["id"])}">{esc(get_product_code(p,cols))} · {esc(get_product_name(p,cols))}</option>' for p in products)
+    counted=sum(1 for line in lines if line.get("counted"));uncounted=len(lines)-counted
+    variance_lines=sum(1 for line in lines if line.get("variance") is not None and float(line.get("variance") or 0)!=0)
+    line_rows="".join(f'''<tr class="{'warn' if line.get('variance') is not None and float(line.get('variance') or 0)!=0 else ''}"><td>{esc(line.get('cdg_prod'))}<br><strong>{esc(line.get('product_name'))}</strong></td><td>{esc(line.get('system_quantity'))}</td><td>{esc(line.get('reserved_quantity'))}</td><td>{esc(line.get('actual_quantity') if line.get('counted') else 'UNCOUNTED')}</td><td>{esc(line.get('variance') if line.get('counted') else '—')}</td><td>{esc(line.get('counted_by') or '—')}</td><td>{esc(line.get('movement_id') or '—')}</td></tr>''' for line in lines)
+    event_rows="".join(f'''<tr><td>{esc(e.get('created_at'))}</td><td>{esc(e.get('event_type'))}</td><td>{esc(e.get('actor'))}</td><td>{esc(e.get('product_id') or '—')}</td><td>{esc(e.get('details'))}</td></tr>''' for e in events)
+    active=session.get("status")=="ACTIVE";submitted=session.get("status")=="SUBMITTED";version=int(session.get("version") or 1)
+    counting=f'''<div class="card"><h2>Count products</h2><div class="grid2"><form method="post" action="/inventory-counts/{session_id}/scan{token_query(request)}"><h3>Scanner increment</h3><label>Barcode</label><input name="barcode" autofocus autocomplete="off" required style="font-size:22px"><label>Packages</label><input type="number" name="packages" value="1" min="0.001" step="0.001"><label>Counter</label><input name="operator_name" value="{esc(session.get('operator_name'))}" required><br><br><button>Register scan</button></form><form method="post" action="/inventory-counts/{session_id}/quantity{token_query(request)}"><h3>Set exact physical quantity</h3><label>Product</label><select name="product_id">{product_options_html}</select><label>Physical quantity</label><input type="number" name="actual_quantity" min="0" step="0.001" required><label>Counter</label><input name="operator_name" value="{esc(session.get('operator_name'))}" required><br><br><button>Set quantity</button></form></div></div><div class="card"><h2>Submit for approval</h2><p>Submission locks counting. Full counts cannot be submitted with uncounted products.</p><form method="post" action="/inventory-counts/{session_id}/submit{token_query(request)}"><input type="hidden" name="expected_version" value="{version}"><label>Counter</label><input name="operator_name" value="{esc(session.get('operator_name'))}" required><label>Reason</label><input name="reason" minlength="5" required placeholder="End-of-day physical count"><br><br><button>Submit count</button></form></div>''' if active else ''
+    approval=f'''<div class="card"><h2>Independent approval</h2><p class="muted">The approver must differ from the counter. Posting is refused if ledger stock changed after the snapshot.</p><form method="post" action="/inventory-counts/{session_id}/approve{token_query(request)}" onsubmit="return confirm('Post all count variances to the stock ledger?');"><input type="hidden" name="expected_version" value="{version}"><label>Approver</label><input name="approver" value="manager" required><label>Approval reason</label><input name="reason" minlength="5" required placeholder="Physical count reviewed"><br><br><button>Approve and post adjustments</button></form></div>''' if submitted else ''
+    void_control=f'''<div class="card"><h2>Void count</h2><form method="post" action="/inventory-counts/{session_id}/void{token_query(request)}" onsubmit="return confirm('Void this count without changing stock?');"><label>Actor</label><input name="actor" value="manager" required><label>Reason</label><input name="reason" minlength="5" required><br><br><button class="secondary">Void count</button></form></div>''' if active or submitted else ''
+    body=f'''<div class="card"><h2>{esc(session.get('reference'))} · {esc(session.get('status'))}</h2><p>Scope {esc(session.get('count_scope'))} · Counter {esc(session.get('operator_name'))} · Version {version}</p><div class="quick-actions"><strong>{counted}</strong> counted <strong>{uncounted}</strong> uncounted <strong>{variance_lines}</strong> variance lines</div></div>{counting}{approval}{void_control}<div class="card"><h2>Snapshot and physical quantities</h2><table><thead><tr><th>Product</th><th>System snapshot</th><th>Reserved</th><th>Physical</th><th>Variance</th><th>Counted by</th><th>Movement</th></tr></thead><tbody>{line_rows or '<tr><td colspan="7">No products selected yet.</td></tr>'}</tbody></table></div><div class="card"><h2>Immutable audit history</h2><table><thead><tr><th>Time</th><th>Event</th><th>Actor</th><th>Product</th><th>Details</th></tr></thead><tbody>{event_rows}</tbody></table></div>'''
+    return html_page("Stock Count",body,flash=flash,auth_query=token_query(request))
+
+
+@app.post("/inventory-counts/{session_id}/scan")
+def inventory_count_scan(session_id:int,request:Request,barcode:str=Form(...),packages:float=Form(1),operator_name:str=Form("inventory"),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    pg_rpc("scan_inventory_count",{"p_session_id":session_id,"p_barcode":barcode,"p_packages":packages,"p_operator":operator_name})
+    return RedirectResponse(with_token(f"/inventory-counts/{session_id}?flash=Count+scan+accepted",request),303)
+
+
+@app.post("/inventory-counts/{session_id}/quantity")
+def inventory_count_quantity(session_id:int,request:Request,product_id:int=Form(...),actual_quantity:float=Form(...),operator_name:str=Form("inventory"),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    pg_rpc("set_inventory_count_quantity",{"p_session_id":session_id,"p_product_id":product_id,"p_actual_quantity":actual_quantity,"p_operator":operator_name})
+    return RedirectResponse(with_token(f"/inventory-counts/{session_id}?flash=Physical+quantity+saved",request),303)
+
+
+@app.post("/inventory-counts/{session_id}/submit")
+def inventory_count_submit(session_id:int,request:Request,operator_name:str=Form(...),reason:str=Form(...),expected_version:int=Form(...),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    pg_rpc("submit_inventory_count",{"p_session_id":session_id,"p_operator":operator_name,"p_reason":reason,"p_expected_version":expected_version})
+    return RedirectResponse(with_token(f"/inventory-counts/{session_id}?flash=Count+submitted",request),303)
+
+
+@app.post("/inventory-counts/{session_id}/approve")
+def inventory_count_approve(session_id:int,request:Request,approver:str=Form(...),reason:str=Form(...),expected_version:int=Form(...),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    pg_rpc("approve_inventory_count",{"p_session_id":session_id,"p_approver":approver,"p_reason":reason,"p_expected_version":expected_version})
+    return RedirectResponse(with_token(f"/inventory-counts/{session_id}?flash=Count+approved+and+posted",request),303)
+
+
+@app.post("/inventory-counts/{session_id}/void")
+def inventory_count_void(session_id:int,request:Request,actor:str=Form(...),reason:str=Form(...),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    pg_rpc("void_inventory_count",{"p_session_id":session_id,"p_actor":actor,"p_reason":reason})
+    return RedirectResponse(with_token(f"/inventory-counts/{session_id}?flash=Count+voided",request),303)
 
 
 @app.get("/product/{product_id}", response_class=HTMLResponse)

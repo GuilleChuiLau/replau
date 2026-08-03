@@ -32,6 +32,16 @@ receipt/detail records so existing stock and PO triggers remain authoritative.
 Voiding writes compensating movements, annuls the receipt, and recomputes PO
 quantities; it is blocked after the received lot has been consumed.
 
+## Controlled stock counts
+
+Apply `postgrest_local/add_inventory_counting.sql` after the barcode/receiving
+migrations. The protected `/inventory-counts` workspace supports full and cycle
+counts using the handheld scanner or exact manual quantities. Counts preserve a
+stock and reservation snapshot, require a reason at submission, require a
+different approver, and post only append-only `AJUSTE_POSITIVO` or
+`AJUSTE_NEGATIVO` ledger movements. Approval is rejected if stock changed after
+the snapshot. Full counts cannot be submitted with uncounted active products.
+
 ## URL
 
 ```text
