@@ -2,6 +2,22 @@
 
 Adds a local product/admin management UI for your Replau WhatsApp order system.
 
+## Barcode and scanner receiving
+
+Apply `postgrest_local/add_scanner_picking.sql` and then
+`postgrest_local/add_barcode_receiving.sql`. The protected `/barcodes` workspace
+manages Code 128, Replau QR, EAN-13/GTIN-13, and GTIN-14 mappings with packaging
+levels and units-per-scan factors. EAN/GTIN values are check-digit validated;
+12/13-digit bodies receive a calculated check digit. Printable local SVG labels
+do not use a hosted barcode service.
+
+The protected `/receiving` workspace records immutable accepted/rejected scans
+and shows base-unit conversion before stock changes. Only the explicit **Post
+receiving to stock** action writes `RECEPCION` movements. Voiding a posted
+receipt writes compensating `AJUSTE_NEGATIVO` movements and is blocked when that
+stock has already been consumed. Supplier GS1 values must be registered as
+printed; do not invent retail GTINs without an assigned GS1 company prefix.
+
 ## URL
 
 ```text

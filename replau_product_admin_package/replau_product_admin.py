@@ -14,6 +14,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
+import barcode as barcode_lib
+import qrcode
+import qrcode.image.svg
+from barcode.writer import SVGWriter
 from fastapi import FastAPI, Form, Header, HTTPException, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -117,6 +121,8 @@ def erp_nav(auth_query: str = "") -> str:
         <a href="/{auth_query}">Products</a>
         <a href="/recipes{auth_query}">Recipes</a>
         <a href="/costs{auth_query}">Costs</a>
+        <a href="/barcodes{auth_query}">Barcodes</a>
+        <a href="/receiving{auth_query}">Receiving</a>
         <a href="/menu" target="_blank">Public Menu</a>
       </div>
     """
@@ -143,6 +149,52 @@ def pg_post(path: str, payload: Dict[str, Any]) -> Any:
     )
     r.raise_for_status()
     return r.json()
+
+
+def pg_rpc(name: str, payload: Dict[str, Any]) -> Any:
+    return pg_post(f"/rpc/{name}", payload)
+
+
+def gtin_check_digit(body: str) -> str:
+    if not body.isdigit():
+        raise ValueError("GTIN must contain only digits")
+    total, weight = 0, 3
+    for char in reversed(body):
+        total += int(char) * weight
+        weight = 1 if weight == 3 else 3
+    return str((10 - total % 10) % 10)
+
+
+def normalize_barcode(value: str, barcode_type: str, product_id: Optional[int] = None) -> str:
+    value, kind = value.strip(), barcode_type.strip().upper()
+    if kind == "EAN13":
+        if len(value) == 12 and value.isdigit(): value += gtin_check_digit(value)
+        if len(value) != 13 or not value.isdigit() or value[-1] != gtin_check_digit(value[:-1]):
+            raise ValueError("Invalid EAN-13 / GTIN-13 check digit")
+    elif kind == "GTIN14":
+        if len(value) == 13 and value.isdigit(): value += gtin_check_digit(value)
+        if len(value) != 14 or not value.isdigit() or value[-1] != gtin_check_digit(value[:-1]):
+            raise ValueError("Invalid GTIN-14 check digit")
+    elif kind == "QR":
+        value = value or (f"REPLAU:PRODUCT:{product_id}" if product_id else "")
+        if not value.startswith("REPLAU:PRODUCT:"): raise ValueError("QR must use REPLAU:PRODUCT:<id>")
+    elif kind == "CODE128":
+        if not value or len(value) > 120: raise ValueError("Code 128 value is required")
+    else: raise ValueError("Unsupported barcode type")
+    return value
+
+
+def barcode_svg(value: str, barcode_type: str) -> str:
+    kind = barcode_type.upper()
+    if kind == "QR":
+        image = qrcode.make(value, image_factory=qrcode.image.svg.SvgPathImage, box_size=5, border=2)
+        stream = io.BytesIO(); image.save(stream); raw = stream.getvalue().decode("utf-8")
+    else:
+        symbology = {"EAN13":"ean13", "GTIN14":"itf", "CODE128":"code128"}[kind]
+        payload = value[:12] if kind == "EAN13" else value
+        stream = io.BytesIO(); barcode_lib.get(symbology, payload, writer=SVGWriter()).write(stream, {"write_text":True,"module_height":12,"quiet_zone":2,"font_size":8,"text_distance":2})
+        raw = stream.getvalue().decode("utf-8")
+    return re.sub(r"<\?xml[^>]*>|<!DOCTYPE[^>]*>", "", raw).strip()
 
 
 def pg_patch(path: str, payload: Dict[str, Any]) -> Any:
@@ -963,8 +1015,12 @@ def html_page(title: str, body: str, flash: str = "", auth_query: str = "") -> H
     .workspace-card strong {{ display:block; margin-top:8px; font-size:26px; line-height:1; }}
     .quick-actions {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }}
     .quick-actions a {{ display:inline-block; padding:9px 12px; border-radius:12px; background:#334155; color:#e5e7eb; font-weight:bold; }}
+    .label-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:12px; }}
+    .barcode-label {{ background:white; color:#111; border:1px dashed #777; padding:12px; text-align:center; break-inside:avoid; }}
+    .barcode-label svg {{ width:100%; max-height:120px; }}
     pre {{ white-space:pre-wrap; }}
     @media(max-width:900px) {{ .grid, .grid2, .workspace-grid {{ grid-template-columns:1fr; }} }}
+    @media print {{ body{{background:white;color:#111}} .top,.erp-nav,.nav,.no-print{{display:none!important}} .wrap{{max-width:none;padding:0}} .card{{box-shadow:none;border:0;margin:0;padding:0}} }}
   </style>
 </head>
 <body>
@@ -978,6 +1034,8 @@ def html_page(title: str, body: str, flash: str = "", auth_query: str = "") -> H
         <a href="/{auth_query}">Products</a>
         <a href="/recipes{auth_query}">Recipes</a>
         <a href="/costs{auth_query}">Recipe Costs</a>
+        <a href="/barcodes{auth_query}">Barcodes</a>
+        <a href="/receiving{auth_query}">Receiving</a>
         <a href="/bulk{auth_query}">Bulk CSV</a>
         <a href="/menu" target="_blank">Public Menu</a>
         <a href="/health{auth_query}">Health</a>
@@ -1741,6 +1799,106 @@ def create_product(request: Request, code: str = Form(...), name: str = Form(...
     deactivate_old_prices(pid, unidad)
     pg_post(f"/{PRICES_ENDPOINT}", build_price_payload(pid, unidad, precio, moneda, True))
     return RedirectResponse(url=with_token("/?flash=Product+saved", request), status_code=303)
+
+
+@app.get("/barcodes", response_class=HTMLResponse)
+def barcodes_page(request: Request, flash: str="", x_admin_token: Optional[str]=Header(default=None,alias="X-Admin-Token")) -> HTMLResponse:
+    check_auth(request,x_admin_token)
+    rows=pg_get("/product_barcodes?select=*&order=producto_id.asc,is_primary.desc,id.asc&limit=5000")
+    products=product_lookup(); product_rows=get_products(active_filter="all")
+    product_select="".join(f'<option value="{int(p.get("id"))}">{esc(get_product_code(p,product_columns()))} · {esc(get_product_name(p,product_columns()))}</option>' for p in product_rows if p.get("id") is not None)
+    table_rows="".join(f'''<tr><td>{esc(products.get(str(r.get('producto_id'))) or r.get('producto_id'))}</td><td><strong>{esc(r.get('barcode'))}</strong><br><span class="muted">{esc(r.get('label'))}</span></td><td>{esc(r.get('barcode_type'))}</td><td>{esc(r.get('packaging_level'))}</td><td>{esc(r.get('unit_factor'))}</td><td>{esc(r.get('source'))}</td><td>{'Primary · ' if r.get('is_primary') else ''}{'Active' if r.get('active') else 'Inactive'}</td><td><a href="/labels?barcode_ids={int(r.get('id'))}{token_query(request)}">Print</a><form method="post" action="/barcodes/{int(r.get('id'))}/active{token_query(request)}" style="display:inline;margin-left:8px"><input type="hidden" name="active" value="{'false' if r.get('active') else 'true'}"><button class="secondary">{'Disable' if r.get('active') else 'Enable'}</button></form></td></tr>''' for r in rows)
+    active_ids=",".join(str(int(r["id"])) for r in rows if r.get("active"))
+    body=f'''<div class="card"><h2>Register barcode</h2><p class="muted">EAN-13 and GTIN-14 accept a 12/13-digit body and calculate the final check digit, or validate a complete code. Use supplier/GS1 values exactly as printed.</p><form method="post" action="/barcodes{token_query(request)}"><div class="grid"><div><label>Product</label><select name="product_id" required>{product_select}</select></div><div><label>Type</label><select name="barcode_type"><option>CODE128</option><option>QR</option><option>EAN13</option><option>GTIN14</option></select></div><div><label>Barcode / GTIN body</label><input name="barcode" placeholder="Leave blank only for QR"></div><div><label>Packaging</label><select name="packaging_level"><option>UNIT</option><option>PACK</option><option>CASE</option><option>PALLET</option></select></div><div><label>Units per scan</label><input type="number" name="unit_factor" value="1" min="0.001" step="0.001" required></div><div><label>Source</label><select name="source"><option>INTERNAL</option><option>SUPPLIER</option><option>GS1</option></select></div><div><label>Label</label><input name="label" placeholder="Unit, box of 12"></div><div><label>Primary</label><select name="is_primary"><option value="false">No</option><option value="true">Yes</option></select></div></div><label>Notes</label><input name="notes"><br><br><button>Save barcode</button></form></div><div class="card"><div class="top"><div><h2>Barcode registry</h2><p class="muted">{len(rows)} mappings · duplicate values are database-blocked.</p></div>{f'<a href="/labels?barcode_ids={active_ids}{token_query(request)}">Print all active labels</a>' if active_ids else ''}</div><table><thead><tr><th>Product</th><th>Value</th><th>Type</th><th>Level</th><th>Factor</th><th>Source</th><th>Status</th><th>Actions</th></tr></thead><tbody>{table_rows or '<tr><td colspan="8">No barcodes.</td></tr>'}</tbody></table></div>'''
+    return html_page("Barcode Admin",body,flash=flash,auth_query=token_query(request))
+
+
+@app.post("/barcodes")
+def barcode_save(request:Request,product_id:int=Form(...),barcode_type:str=Form(...),barcode:str=Form(""),packaging_level:str=Form("UNIT"),unit_factor:float=Form(1),source:str=Form("INTERNAL"),is_primary:str=Form("false"),label:str=Form(""),notes:str=Form(""),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    try:
+        clean=normalize_barcode(barcode,barcode_type,product_id)
+        pg_rpc("save_product_barcode",{"p_product_id":product_id,"p_barcode":clean,"p_barcode_type":barcode_type.upper(),"p_packaging_level":packaging_level.upper(),"p_unit_factor":unit_factor,"p_source":source.upper(),"p_is_primary":normalize_bool(is_primary),"p_label":label or None,"p_notes":notes or None})
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    except requests.HTTPError as exc: raise HTTPException(409,exc.response.text)
+    return RedirectResponse(with_token("/barcodes?flash=Barcode+saved",request),303)
+
+
+@app.post("/barcodes/{barcode_id}/active")
+def barcode_active(barcode_id:int,request:Request,active:str=Form(...),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token); pg_patch(f"/product_barcodes?id=eq.{barcode_id}",{"active":normalize_bool(active),"is_primary":False if not normalize_bool(active) else False})
+    return RedirectResponse(with_token("/barcodes?flash=Barcode+status+updated",request),303)
+
+
+@app.get("/labels",response_class=HTMLResponse)
+def barcode_labels(request:Request,barcode_ids:str="",x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> HTMLResponse:
+    check_auth(request,x_admin_token)
+    ids=[int(x) for x in barcode_ids.split(",") if x.strip().isdigit()][:200]
+    if not ids: raise HTTPException(400,"Select at least one barcode")
+    rows=pg_get(f"/product_barcodes?id=in.({','.join(map(str,ids))})&active=eq.true&select=*&order=id.asc")
+    products=product_lookup(); labels=[]
+    for row in rows:
+        try: graphic=barcode_svg(str(row.get("barcode")),str(row.get("barcode_type")))
+        except Exception as exc: graphic=f'<p>Render error: {esc(exc)}</p>'
+        labels.append(f'''<div class="barcode-label"><strong>{esc(products.get(str(row.get('producto_id'))) or row.get('producto_id'))}</strong><div>{esc(row.get('packaging_level'))} · {esc(row.get('unit_factor'))} unit(s)</div>{graphic}<small>{esc(row.get('barcode_type'))} · {esc(row.get('barcode'))}</small></div>''')
+    body=f'''<div class="card"><div class="no-print"><button onclick="window.print()">Print labels</button> <a href="/barcodes{token_query(request)}">Back to Barcode Admin</a></div><div class="label-grid">{''.join(labels)}</div></div>'''
+    return html_page("Printable Labels",body,auth_query=token_query(request))
+
+
+@app.get("/receiving",response_class=HTMLResponse)
+def receiving_page(request:Request,flash:str="",x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> HTMLResponse:
+    check_auth(request,x_admin_token)
+    warehouses=pg_get("/almacenes?active=eq.true&select=id,codigo,nombre&order=id.asc")
+    sessions=pg_get("/inventory_receiving_sessions?select=*&order=id.desc&limit=100")
+    options="".join(f'<option value="{int(w["id"])}">{esc(w.get("codigo"))} · {esc(w.get("nombre"))}</option>' for w in warehouses)
+    rows="".join(f'''<tr><td><a href="/receiving/{int(s['id'])}{token_query(request)}"><strong>{esc(s.get('reference'))}</strong></a></td><td>{esc(s.get('status'))}</td><td>{esc(s.get('supplier_name'))}</td><td>{esc(s.get('operator_name'))}</td><td>{esc(s.get('started_at'))}</td><td>{esc(s.get('posted_at') or s.get('voided_at'))}</td></tr>''' for s in sessions)
+    body=f'''<div class="card"><h2>Start receiving session</h2><p class="muted">Starting a session does not change stock. Stock is added only after an explicit reviewed Post action.</p><form method="post" action="/receiving{token_query(request)}"><div class="grid"><div><label>Warehouse</label><select name="warehouse_id">{options}</select></div><div><label>Operator</label><input name="operator_name" value="inventory" required></div><div><label>Supplier</label><input name="supplier_name"></div><div><label>Notes</label><input name="notes"></div></div><br><button>Start session</button></form></div><div class="card"><h2>Receiving history</h2><table><thead><tr><th>Reference</th><th>Status</th><th>Supplier</th><th>Operator</th><th>Started</th><th>Closed</th></tr></thead><tbody>{rows or '<tr><td colspan="6">No sessions.</td></tr>'}</tbody></table></div>'''
+    return html_page("Scanner Receiving",body,flash=flash,auth_query=token_query(request))
+
+
+@app.post("/receiving")
+def receiving_create(request:Request,warehouse_id:int=Form(...),operator_name:str=Form(...),supplier_name:str=Form(""),notes:str=Form(""),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token); result=pg_rpc("create_inventory_receiving",{"p_warehouse_id":warehouse_id,"p_operator":operator_name,"p_supplier":supplier_name or None,"p_notes":notes or None})
+    return RedirectResponse(with_token(f"/receiving/{int(result['session_id'])}?flash=Session+started",request),303)
+
+
+@app.get("/receiving/{session_id}",response_class=HTMLResponse)
+def receiving_detail(session_id:int,request:Request,flash:str="",x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> HTMLResponse:
+    check_auth(request,x_admin_token)
+    sessions=pg_get(f"/inventory_receiving_sessions?id=eq.{session_id}&select=*&limit=1")
+    if not sessions: raise HTTPException(404,"Receiving session not found")
+    session=sessions[0]; scans=pg_get(f"/v_inventory_receiving_scans?session_id=eq.{session_id}&select=*&order=id.desc&limit=1000")
+    accepted=[s for s in scans if s.get("result")=="ACCEPTED"]
+    rows="".join(f'''<tr><td>{esc(s.get('created_at'))}</td><td>{esc(s.get('barcode'))}</td><td>{esc(s.get('product_name') or '—')}</td><td>{esc(s.get('package_quantity'))} × {esc(s.get('unit_factor'))}</td><td>{esc(s.get('base_quantity'))}</td><td>{esc(s.get('result'))}</td><td>{esc(s.get('movement_id'))}</td></tr>''' for s in scans)
+    active=session.get("status")=="ACTIVE"
+    scan_form=f'''<div class="card"><h2>Scan incoming stock</h2><form method="post" action="/receiving/{session_id}/scan{token_query(request)}"><div class="grid"><div><label>Barcode</label><input name="barcode" autofocus autocomplete="off" required style="font-size:22px"></div><div><label>Packages</label><input type="number" name="packages" value="1" min="0.001" step="0.001"></div><div><label>Lot (optional)</label><input name="lot_code"></div><div><label>Expires (optional)</label><input type="date" name="expires_on"></div></div><label>Operator</label><input name="operator_name" value="{esc(session.get('operator_name'))}" required><br><br><button>Register scan</button></form></div>''' if active else ''
+    controls=f'''<div class="card"><h2>Review and close</h2><p><strong>{len(accepted)}</strong> accepted scan(s) · <strong>{sum(float(s.get('base_quantity') or 0) for s in accepted):.3f}</strong> base units.</p><form method="post" action="/receiving/{session_id}/post{token_query(request)}" onsubmit="return confirm('Post this receiving and add stock?');"><input name="operator_name" value="{esc(session.get('operator_name'))}" required><br><br><button>Post receiving to stock</button></form><hr><form method="post" action="/receiving/{session_id}/void{token_query(request)}" onsubmit="return confirm('Void this receiving? Posted stock will be reversed if still available.');"><input name="operator_name" value="{esc(session.get('operator_name'))}" required><label>Required reason</label><input name="reason" minlength="5" required><br><br><button class="secondary">Void / reverse</button></form></div>''' if session.get('status')!='VOIDED' else ''
+    body=f'''<div class="card"><h2>{esc(session.get('reference'))} · {esc(session.get('status'))}</h2><p>Warehouse {esc(session.get('warehouse_id'))} · Supplier {esc(session.get('supplier_name') or '—')} · Started {esc(session.get('started_at'))}</p></div>{scan_form}{controls}<div class="card"><h2>Immutable scan history</h2><table><thead><tr><th>Time</th><th>Barcode</th><th>Product</th><th>Packages × factor</th><th>Base qty</th><th>Result</th><th>Movement</th></tr></thead><tbody>{rows or '<tr><td colspan="7">No scans yet.</td></tr>'}</tbody></table></div>'''
+    return html_page("Receiving Detail",body,flash=flash,auth_query=token_query(request))
+
+
+@app.post("/receiving/{session_id}/scan")
+def receiving_scan(session_id:int,request:Request,barcode:str=Form(...),packages:float=Form(1),operator_name:str=Form("inventory"),lot_code:str=Form(""),expires_on:str=Form(""),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    expiry=None
+    if expires_on:
+        try: expiry=date.fromisoformat(expires_on).isoformat()
+        except ValueError: raise HTTPException(400,"Invalid expiration date")
+    result=pg_rpc("scan_inventory_receiving",{"p_session_id":session_id,"p_barcode":barcode,"p_packages":packages,"p_operator":operator_name,"p_lot_code":lot_code or None,"p_expires_on":expiry})
+    message="Scan accepted" if result.get("ok") else str(result.get("reason") or "Scan rejected")
+    return RedirectResponse(with_token(f"/receiving/{session_id}?flash={quote(message,safe='')}",request),303)
+
+
+@app.post("/receiving/{session_id}/post")
+def receiving_post(session_id:int,request:Request,operator_name:str=Form("inventory"),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token); pg_rpc("post_inventory_receiving",{"p_session_id":session_id,"p_operator":operator_name})
+    return RedirectResponse(with_token(f"/receiving/{session_id}?flash=Receiving+posted",request),303)
+
+
+@app.post("/receiving/{session_id}/void")
+def receiving_void(session_id:int,request:Request,operator_name:str=Form("inventory"),reason:str=Form(...),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token); pg_rpc("void_inventory_receiving",{"p_session_id":session_id,"p_operator":operator_name,"p_reason":reason})
+    return RedirectResponse(with_token(f"/receiving/{session_id}?flash=Receiving+voided",request),303)
 
 
 @app.get("/product/{product_id}", response_class=HTMLResponse)
