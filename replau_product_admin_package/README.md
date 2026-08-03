@@ -50,6 +50,17 @@ when the balance is insufficient. Reservation expiry defaults to preview-only;
 paid, preparing, and picked orders are protected, and released reservations
 must pass the same availability check before preparation can begin.
 
+## Unified ingredient ledger
+
+Apply `postgrest_local/add_unified_ingredient_inventory.sql` after inventory
+counting and availability. `/ingredient-ledger` replaces mutable ingredient
+stock counters with append-only receipts, consumption, waste, returns, and
+audited adjustments by warehouse. Receipts support supplier, lot, expiration,
+reference, and weighted-average cost. Recipe cost screens read balances from
+the same ledger, and optional ingredient enforcement prevents negative waste
+or consumption. Legacy `stk_in/stk_out` values are migrated once as identified
+opening-balance movements.
+
 ## URL
 
 ```text

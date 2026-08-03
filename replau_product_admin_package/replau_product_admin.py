@@ -121,6 +121,7 @@ def erp_nav(auth_query: str = "") -> str:
         <a href="/{auth_query}">Products</a>
         <a href="/recipes{auth_query}">Recipes</a>
         <a href="/costs{auth_query}">Costs</a>
+        <a href="/ingredient-ledger{auth_query}">Ingredients</a>
         <a href="/barcodes{auth_query}">Barcodes</a>
         <a href="/receiving{auth_query}">Receiving</a>
         <a href="/inventory-counts{auth_query}">Stock Counts</a>
@@ -423,7 +424,7 @@ def normalize_cost_recipe(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def load_recipe_costs() -> Dict[str, Any]:
     try:
-        ingredient_rows = pg_get(f"/{INGREDIENT_COST_ENDPOINT}?active=eq.true&order=nombre.asc&limit=1000")
+        ingredient_rows = pg_get("/v_ingredient_inventory_summary?active=eq.true&order=nombre.asc&limit=1000")
         recipe_rows = pg_get(f"/{RECIPE_COST_ENDPOINT}?active=eq.true&order=nombre.asc&limit=1000")
         line_rows = pg_get(f"/{RECIPE_INGREDIENT_COST_ENDPOINT}?order=id.asc&limit=5000")
     except Exception:
@@ -1037,6 +1038,7 @@ def html_page(title: str, body: str, flash: str = "", auth_query: str = "") -> H
         <a href="/{auth_query}">Products</a>
         <a href="/recipes{auth_query}">Recipes</a>
         <a href="/costs{auth_query}">Recipe Costs</a>
+        <a href="/ingredient-ledger{auth_query}">Ingredients</a>
         <a href="/barcodes{auth_query}">Barcodes</a>
         <a href="/receiving{auth_query}">Receiving</a>
         <a href="/inventory-counts{auth_query}">Stock Counts</a>
@@ -1561,29 +1563,32 @@ def recipe_costs_page(request: Request, flash: str = "", x_admin_token: Optional
 @app.post("/costs/ingredients")
 def create_ingredient(request: Request, name: str = Form(...), provider_id: str = Form(""), cost_per_kg: float = Form(...), currency: str = Form(DEFAULT_MONEDA), stk_in_kg: float = Form(0), stk_out_kg: float = Form(0), x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")) -> RedirectResponse:
     check_auth(request, x_admin_token)
-    pg_post(f"/{INGREDIENT_COST_ENDPOINT}", {
+    initial_in=parse_nonnegative_float(stk_in_kg,"stk_in_kg");initial_out=parse_nonnegative_float(stk_out_kg,"stk_out_kg")
+    created=pg_post(f"/{INGREDIENT_COST_ENDPOINT}", {
         "nombre": name.strip(),
         "proveedor_id": int(provider_id) if str(provider_id or "").strip() else None,
         "costo_kg": parse_positive_float(cost_per_kg, "cost_per_kg"),
         "moneda": (currency or DEFAULT_MONEDA).strip().upper(),
-        "stk_in": parse_nonnegative_float(stk_in_kg, "stk_in_kg"),
-        "stk_out": parse_nonnegative_float(stk_out_kg, "stk_out_kg"),
+        "stk_in": 0,
+        "stk_out": 0,
         "active": True,
     })
+    ingredient_id=int((created[0] if created else {}).get("id"))
+    warehouse_id=int(pg_rpc("get_default_almacen_id",{}) or 0)
+    if initial_in>0: pg_rpc("post_ingredient_movement",{"p_ingredient_id":ingredient_id,"p_warehouse_id":warehouse_id,"p_movement_type":"ADJUST_POSITIVE","p_quantity_kg":initial_in,"p_actor":"cost-admin","p_reason":"Initial ingredient balance","p_reason_code":"OPENING_BALANCE","p_unit_cost":cost_per_kg,"p_currency":currency,"p_supplier_id":int(provider_id) if str(provider_id or "").strip() else None,"p_lot_code":None,"p_expires_on":None,"p_doc_type":"OPENING_BALANCE","p_doc_id":None,"p_doc_line_id":None,"p_reference":None})
+    if initial_out>0: pg_rpc("post_ingredient_movement",{"p_ingredient_id":ingredient_id,"p_warehouse_id":warehouse_id,"p_movement_type":"ADJUST_NEGATIVE","p_quantity_kg":initial_out,"p_actor":"cost-admin","p_reason":"Initial ingredient usage balance","p_reason_code":"OPENING_BALANCE","p_unit_cost":None,"p_currency":currency,"p_supplier_id":None,"p_lot_code":None,"p_expires_on":None,"p_doc_type":"OPENING_BALANCE","p_doc_id":None,"p_doc_line_id":None,"p_reference":None})
     return RedirectResponse(url=with_token("/costs?flash=Ingredient+saved", request), status_code=303)
 
 
 @app.post("/costs/ingredients/{ingredient_id}/stock")
 def update_ingredient_stock(ingredient_id: str, request: Request, stk_in_delta_kg: float = Form(0), stk_out_delta_kg: float = Form(0), x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")) -> RedirectResponse:
     check_auth(request, x_admin_token)
-    data = load_recipe_costs()
-    ing = data.get("ingredients", {}).get(str(ingredient_id))
-    if not ing:
-        raise HTTPException(status_code=404, detail="Ingredient not found")
-    pg_patch(f"/{INGREDIENT_COST_ENDPOINT}?id=eq.{requests.utils.quote(str(ingredient_id))}", {
-        "stk_in": float(ing.get("stk_in_kg") or 0) + parse_nonnegative_float(stk_in_delta_kg, "stk_in_delta_kg"),
-        "stk_out": float(ing.get("stk_out_kg") or 0) + parse_nonnegative_float(stk_out_delta_kg, "stk_out_delta_kg"),
-    })
+    stock_in=parse_nonnegative_float(stk_in_delta_kg,"stk_in_delta_kg");stock_out=parse_nonnegative_float(stk_out_delta_kg,"stk_out_delta_kg")
+    if stock_in<=0 and stock_out<=0: raise HTTPException(400,"Enter a positive stock movement")
+    warehouse_id=int(pg_rpc("get_default_almacen_id",{}) or 0)
+    common={"p_ingredient_id":int(ingredient_id),"p_warehouse_id":warehouse_id,"p_actor":"cost-admin","p_reason_code":"MANUAL_COST_SCREEN","p_unit_cost":None,"p_currency":"PEN","p_supplier_id":None,"p_lot_code":None,"p_expires_on":None,"p_doc_type":"MANUAL_INGREDIENT_MOVEMENT","p_doc_id":None,"p_doc_line_id":None,"p_reference":None}
+    if stock_in>0: pg_rpc("post_ingredient_movement",{**common,"p_movement_type":"ADJUST_POSITIVE","p_quantity_kg":stock_in,"p_reason":"Manual positive ingredient adjustment"})
+    if stock_out>0: pg_rpc("post_ingredient_movement",{**common,"p_movement_type":"ADJUST_NEGATIVE","p_quantity_kg":stock_out,"p_reason":"Manual negative ingredient adjustment"})
     return RedirectResponse(url=with_token(f"/costs?flash=Stock+updated", request), status_code=303)
 
 
@@ -2096,6 +2101,49 @@ def inventory_reservations_expire(request:Request,actor:str=Form(...),dry_run:st
     count=int(result.get("candidate_count") or 0) if preview else int(result.get("released_count") or 0)
     message=f'{count} eligible reservation(s)' if preview else f'{count} reservation(s) released'
     return RedirectResponse(with_token(f"/inventory-controls?flash={quote(message,safe='')}",request),303)
+
+
+@app.get("/ingredient-ledger",response_class=HTMLResponse)
+def ingredient_ledger_page(request:Request,flash:str="",x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> HTMLResponse:
+    check_auth(request,x_admin_token)
+    ingredients=pg_get("/v_ingredient_inventory_summary?active=eq.true&select=*&order=nombre.asc")
+    warehouses=pg_get("/almacenes?active=eq.true&select=id,codigo,nombre&order=id.asc")
+    suppliers=pg_get("/proveedores?active=eq.true&select=id,nombre&order=nombre.asc")
+    movements=pg_get("/ingredient_stock_movements?select=*&order=id.desc&limit=300")
+    ingredient_options="".join(f'<option value="{int(i["id"])}">{esc(i.get("sku") or i.get("id"))} · {esc(i.get("nombre"))}</option>' for i in ingredients)
+    warehouse_options="".join(f'<option value="{int(w["id"])}">{esc(w.get("codigo"))} · {esc(w.get("nombre"))}</option>' for w in warehouses)
+    supplier_options='<option value="">No supplier</option>'+"".join(f'<option value="{int(s["id"])}">{esc(s.get("nombre"))}</option>' for s in suppliers)
+    ingredient_map={str(i.get("id")):str(i.get("nombre")) for i in ingredients};warehouse_map={str(w.get("id")):str(w.get("nombre")) for w in warehouses}
+    summary_rows="".join(f'''<tr class="{'warn' if float(i.get('stk_act') or 0)<=float(i.get('stock_minimo') or 0) else ''}"><td>{esc(i.get('sku') or '—')}<br><strong>{esc(i.get('nombre'))}</strong></td><td>{esc(i.get('stk_in'))}</td><td>{esc(i.get('stk_out'))}</td><td>{esc(i.get('stk_act'))}</td><td>{esc(i.get('stock_minimo'))}</td><td>S/ {float(i.get('costo_kg') or 0):.4f}</td><td>{'ENFORCED' if i.get('inventory_enforced') else 'MONITOR'}</td></tr>''' for i in ingredients)
+    movement_rows="".join(f'''<tr><td>{esc(m.get('movement_at'))}</td><td>{esc(ingredient_map.get(str(m.get('ingredient_id'))) or m.get('ingredient_id'))}</td><td>{esc(m.get('movement_type'))}</td><td>{esc(m.get('quantity_kg'))} kg</td><td>{esc(warehouse_map.get(str(m.get('warehouse_id'))) or m.get('warehouse_id'))}</td><td>{esc(m.get('lot_id') or '—')}</td><td>{esc(m.get('actor'))}</td><td>{esc(m.get('reason_code') or '—')} · {esc(m.get('reason'))}</td></tr>''' for m in movements)
+    body=f'''<div class="card"><h2>Ingredient inventory ledger</h2><p class="muted">All receipts, waste, consumption, and corrections are append-only movements. Recipe costs use the same ingredient records; direct stock-counter edits are no longer authoritative.</p><div class="grid2"><form method="post" action="/ingredient-ledger/receipt{token_query(request)}"><h3>Receive ingredient</h3><label>Ingredient</label><select name="ingredient_id">{ingredient_options}</select><label>Warehouse</label><select name="warehouse_id">{warehouse_options}</select><label>Supplier</label><select name="supplier_id">{supplier_options}</select><div class="grid"><div><label>Quantity kg</label><input type="number" name="quantity_kg" min="0.001" step="0.001" required></div><div><label>Cost/kg</label><input type="number" name="unit_cost" min="0" step="0.0001" required></div><div><label>Currency</label><select name="currency"><option>PEN</option><option>USD</option><option>EUR</option></select></div><div><label>Lot</label><input name="lot_code"></div><div><label>Expires</label><input type="date" name="expires_on"></div><div><label>Reference</label><input name="reference"></div></div><label>Receiver</label><input name="actor" value="inventory" required><label>Reason</label><input name="reason" value="Supplier ingredient receipt" minlength="5" required><br><br><button>Post receipt</button></form><form method="post" action="/ingredient-ledger/waste{token_query(request)}"><h3>Record waste</h3><label>Ingredient</label><select name="ingredient_id">{ingredient_options}</select><label>Warehouse</label><select name="warehouse_id">{warehouse_options}</select><label>Quantity kg</label><input type="number" name="quantity_kg" min="0.001" step="0.001" required><label>Waste category</label><select name="reason_code"><option>SPOILAGE</option><option>PREP_LOSS</option><option>DAMAGE</option><option>EXPIRED</option><option>QUALITY</option><option>OTHER</option></select><label>Actor</label><input name="actor" value="kitchen" required><label>Detailed reason</label><input name="reason" minlength="5" required><br><br><button class="secondary">Post waste</button></form></div></div><div class="card"><h2>Controlled correction</h2><form method="post" action="/ingredient-ledger/adjust{token_query(request)}"><div class="grid"><div><label>Ingredient</label><select name="ingredient_id">{ingredient_options}</select></div><div><label>Warehouse</label><select name="warehouse_id">{warehouse_options}</select></div><div><label>Direction</label><select name="direction"><option value="POSITIVE">Positive</option><option value="NEGATIVE">Negative</option></select></div><div><label>Quantity kg</label><input type="number" name="quantity_kg" min="0.001" step="0.001" required></div><div><label>Actor</label><input name="actor" value="manager" required></div><div><label>Reason</label><input name="reason" minlength="5" required></div></div><br><button>Post audited adjustment</button></form></div><div class="card"><h2>Ingredient balances</h2><table><thead><tr><th>Ingredient</th><th>In</th><th>Out</th><th>Current</th><th>Minimum</th><th>Cost/kg</th><th>Mode</th></tr></thead><tbody>{summary_rows or '<tr><td colspan="7">No ingredients yet. Add them from Recipe Costs.</td></tr>'}</tbody></table></div><div class="card"><h2>Movement history</h2><table><thead><tr><th>Time</th><th>Ingredient</th><th>Type</th><th>Quantity</th><th>Warehouse</th><th>Lot</th><th>Actor</th><th>Reason</th></tr></thead><tbody>{movement_rows or '<tr><td colspan="8">No ingredient movements.</td></tr>'}</tbody></table></div>'''
+    return html_page("Ingredient Ledger",body,flash=flash,auth_query=token_query(request))
+
+
+@app.post("/ingredient-ledger/receipt")
+def ingredient_receipt(request:Request,ingredient_id:int=Form(...),warehouse_id:int=Form(...),quantity_kg:float=Form(...),unit_cost:float=Form(...),currency:str=Form("PEN"),supplier_id:str=Form(""),actor:str=Form(...),reason:str=Form(...),lot_code:str=Form(""),expires_on:str=Form(""),reference:str=Form(""),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    expiry=None
+    if expires_on:
+        try: expiry=date.fromisoformat(expires_on).isoformat()
+        except ValueError: raise HTTPException(400,"Invalid expiration date")
+    pg_rpc("post_ingredient_receipt",{"p_ingredient_id":ingredient_id,"p_warehouse_id":warehouse_id,"p_quantity_kg":quantity_kg,"p_unit_cost":unit_cost,"p_currency":currency,"p_supplier_id":int(supplier_id) if supplier_id.strip() else None,"p_actor":actor,"p_reason":reason,"p_lot_code":lot_code or None,"p_expires_on":expiry,"p_reference":reference or None})
+    return RedirectResponse(with_token("/ingredient-ledger?flash=Ingredient+receipt+posted",request),303)
+
+
+@app.post("/ingredient-ledger/waste")
+def ingredient_waste(request:Request,ingredient_id:int=Form(...),warehouse_id:int=Form(...),quantity_kg:float=Form(...),actor:str=Form(...),reason_code:str=Form(...),reason:str=Form(...),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    pg_rpc("post_ingredient_waste",{"p_ingredient_id":ingredient_id,"p_warehouse_id":warehouse_id,"p_quantity_kg":quantity_kg,"p_actor":actor,"p_reason_code":reason_code,"p_reason":reason})
+    return RedirectResponse(with_token("/ingredient-ledger?flash=Waste+posted",request),303)
+
+
+@app.post("/ingredient-ledger/adjust")
+def ingredient_adjust(request:Request,ingredient_id:int=Form(...),warehouse_id:int=Form(...),direction:str=Form(...),quantity_kg:float=Form(...),actor:str=Form(...),reason:str=Form(...),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    kind="ADJUST_POSITIVE" if direction.upper()=="POSITIVE" else "ADJUST_NEGATIVE"
+    pg_rpc("post_ingredient_movement",{"p_ingredient_id":ingredient_id,"p_warehouse_id":warehouse_id,"p_movement_type":kind,"p_quantity_kg":quantity_kg,"p_actor":actor,"p_reason":reason,"p_reason_code":"MANUAL_CORRECTION","p_unit_cost":None,"p_currency":"PEN","p_supplier_id":None,"p_lot_code":None,"p_expires_on":None,"p_doc_type":"MANUAL_INGREDIENT_ADJUSTMENT","p_doc_id":None,"p_doc_line_id":None,"p_reference":None})
+    return RedirectResponse(with_token("/ingredient-ledger?flash=Ingredient+adjustment+posted",request),303)
 
 
 @app.get("/product/{product_id}", response_class=HTMLResponse)
