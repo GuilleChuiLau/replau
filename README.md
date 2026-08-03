@@ -37,3 +37,23 @@ WhatsApp agent isolation without storing secrets.
 
 10. Continuity/memory operations
 - Daily memory logs + long-term MEMORY.md to preserve decisions, incidents, and recovery context across restarts.
+
+## Recipe consumption and ingredient variance
+
+Ingredient stock is deducted automatically when scanner picking completes. The
+posting is transactional and idempotent: a dispatched order can create only one
+ingredient-consumption batch, and an ingredient shortage blocks dispatch only
+when enforcement is enabled for that ingredient. Products without a complete
+active recipe are reported as skipped during gradual rollout.
+
+Install and validate the upgrade with:
+
+```bash
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d localapi \
+  -f postgrest_local/add_recipe_consumption_variance.sql \
+  -f postgrest_local/test_recipe_consumption_variance.sql
+```
+
+The Product Admin Ingredient Ledger shows automatic order consumption plus
+daily theoretical usage, recorded waste, actual usage, waste rate, and waste
+cost. Tests run inside a transaction and roll back all synthetic data.
