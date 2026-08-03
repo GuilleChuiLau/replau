@@ -130,14 +130,19 @@ END $$;
 
 CREATE OR REPLACE FUNCTION api.post_inventory_receiving(p_session_id bigint,p_operator text DEFAULT 'inventory')
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=api,public AS $$
-DECLARE sess api.inventory_receiving_sessions%ROWTYPE; scan api.inventory_receiving_scans%ROWTYPE; mid integer; count_rows integer:=0; total_base numeric:=0;
+DECLARE sess api.inventory_receiving_sessions%ROWTYPE; scan api.inventory_receiving_scans%ROWTYPE; mid integer; lid integer; count_rows integer:=0; total_base numeric:=0;
 BEGIN
  SELECT * INTO sess FROM api.inventory_receiving_sessions WHERE id=p_session_id FOR UPDATE;
  IF sess.id IS NULL THEN RAISE EXCEPTION 'Receiving session not found'; END IF; IF sess.status<>'ACTIVE' THEN RAISE EXCEPTION 'Receiving session is %',sess.status; END IF;
  IF NOT EXISTS(SELECT 1 FROM api.inventory_receiving_scans WHERE session_id=sess.id AND result='ACCEPTED') THEN RAISE EXCEPTION 'No accepted scans to post'; END IF;
  FOR scan IN SELECT * FROM api.inventory_receiving_scans WHERE session_id=sess.id AND result='ACCEPTED' ORDER BY id FOR UPDATE LOOP
-  INSERT INTO api.movimientos_stock(fecha_movimiento,movimiento_tipo,almacen_destino_id,producto_id,cantidad,doc_tipo,doc_id,doc_linea_id,referencia,observacion)
-  VALUES(now(),'RECEPCION',sess.warehouse_id,scan.product_id,scan.base_quantity,'SCANNER_RECEIVING',sess.id,scan.id,sess.reference,'Scanner receiving by '||left(COALESCE(p_operator,'inventory'),80)) RETURNING id INTO mid;
+  lid:=NULL;
+  IF scan.lot_code IS NOT NULL THEN
+   INSERT INTO api.lotes(producto_id,lote_codigo,fecha_venc,active) VALUES(scan.product_id,scan.lot_code,scan.expires_on,true)
+   ON CONFLICT(producto_id,lote_codigo) DO UPDATE SET fecha_venc=COALESCE(EXCLUDED.fecha_venc,api.lotes.fecha_venc),active=true,updated_at=now() RETURNING id INTO lid;
+  END IF;
+  INSERT INTO api.movimientos_stock(fecha_movimiento,movimiento_tipo,almacen_destino_id,producto_id,lote_id,cantidad,doc_tipo,doc_id,doc_linea_id,referencia,observacion)
+  VALUES(now(),'RECEPCION',sess.warehouse_id,scan.product_id,lid,scan.base_quantity,'SCANNER_RECEIVING',sess.id,scan.id,sess.reference,'Scanner receiving by '||left(COALESCE(p_operator,'inventory'),80)) RETURNING id INTO mid;
   UPDATE api.inventory_receiving_scans SET movement_id=mid WHERE id=scan.id; count_rows:=count_rows+1;total_base:=total_base+scan.base_quantity;
  END LOOP;
  UPDATE api.inventory_receiving_sessions SET status='POSTED',posted_at=now(),posted_by=left(COALESCE(p_operator,'inventory'),80),updated_at=now() WHERE id=sess.id;
@@ -146,24 +151,45 @@ END $$;
 
 CREATE OR REPLACE FUNCTION api.void_inventory_receiving(p_session_id bigint,p_operator text,p_reason text)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=api,public AS $$
-DECLARE sess api.inventory_receiving_sessions%ROWTYPE; scan api.inventory_receiving_scans%ROWTYPE; mid integer; count_rows integer:=0; insufficient boolean:=false;
+DECLARE sess api.inventory_receiving_sessions%ROWTYPE; scan api.inventory_receiving_scans%ROWTYPE; mid integer; lid integer; count_rows integer:=0; insufficient boolean:=false;
 BEGIN
  IF length(trim(COALESCE(p_reason,'')))<5 THEN RAISE EXCEPTION 'Void reason must have at least 5 characters'; END IF;
  SELECT * INTO sess FROM api.inventory_receiving_sessions WHERE id=p_session_id FOR UPDATE;
  IF sess.id IS NULL THEN RAISE EXCEPTION 'Receiving session not found'; END IF; IF sess.status='VOIDED' THEN RAISE EXCEPTION 'Receiving session already voided'; END IF;
  IF sess.status='POSTED' THEN
-  WITH needed AS (SELECT product_id,sum(base_quantity) qty FROM api.inventory_receiving_scans WHERE session_id=sess.id AND result='ACCEPTED' GROUP BY product_id),
-  available AS (SELECT producto_id,sum(stock_actual) qty FROM api.v_stock_actual WHERE almacen_id=sess.warehouse_id GROUP BY producto_id)
-  SELECT EXISTS(SELECT 1 FROM needed n LEFT JOIN available a ON a.producto_id=n.product_id WHERE COALESCE(a.qty,0)<n.qty) INTO insufficient;
+  WITH needed AS (SELECT s.product_id,m.lote_id,sum(s.base_quantity) qty FROM api.inventory_receiving_scans s JOIN api.movimientos_stock m ON m.id=s.movement_id WHERE s.session_id=sess.id AND s.result='ACCEPTED' GROUP BY s.product_id,m.lote_id),
+  available AS (SELECT producto_id,lote_id,sum(stock_actual) qty FROM api.v_stock_actual WHERE almacen_id=sess.warehouse_id GROUP BY producto_id,lote_id)
+  SELECT EXISTS(SELECT 1 FROM needed n LEFT JOIN available a ON a.producto_id=n.product_id AND a.lote_id IS NOT DISTINCT FROM n.lote_id WHERE COALESCE(a.qty,0)<n.qty) INTO insufficient;
   IF insufficient THEN RAISE EXCEPTION 'Cannot void receiving: some received stock has already been consumed'; END IF;
   FOR scan IN SELECT * FROM api.inventory_receiving_scans WHERE session_id=sess.id AND result='ACCEPTED' AND movement_id IS NOT NULL ORDER BY id FOR UPDATE LOOP
-   INSERT INTO api.movimientos_stock(fecha_movimiento,movimiento_tipo,almacen_origen_id,producto_id,cantidad,doc_tipo,doc_id,doc_linea_id,referencia,observacion)
-   VALUES(now(),'AJUSTE_NEGATIVO',sess.warehouse_id,scan.product_id,scan.base_quantity,'SCANNER_RECEIVING_VOID',sess.id,scan.id,sess.reference,'Receiving void: '||left(trim(p_reason),300)) RETURNING id INTO mid;
+   SELECT lote_id INTO lid FROM api.movimientos_stock WHERE id=scan.movement_id;
+   INSERT INTO api.movimientos_stock(fecha_movimiento,movimiento_tipo,almacen_origen_id,producto_id,lote_id,cantidad,doc_tipo,doc_id,doc_linea_id,referencia,observacion)
+   VALUES(now(),'AJUSTE_NEGATIVO',sess.warehouse_id,scan.product_id,lid,scan.base_quantity,'SCANNER_RECEIVING_VOID',sess.id,scan.id,sess.reference,'Receiving void: '||left(trim(p_reason),300)) RETURNING id INTO mid;
    UPDATE api.inventory_receiving_scans SET reversal_movement_id=mid WHERE id=scan.id;count_rows:=count_rows+1;
   END LOOP;
  END IF;
  UPDATE api.inventory_receiving_sessions SET status='VOIDED',voided_at=now(),voided_by=left(COALESCE(p_operator,'inventory'),80),void_reason=left(trim(p_reason),500),updated_at=now() WHERE id=sess.id;
  RETURN jsonb_build_object('ok',true,'session_id',sess.id,'status','VOIDED','reversal_count',count_rows);
+END $$;
+
+CREATE OR REPLACE FUNCTION api.scan_picking_barcode(p_pedido_num text,p_token text,p_barcode text,p_operator text DEFAULT 'picking')
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=api,public AS $$
+DECLARE oid integer; sid bigint; bc api.product_barcodes%ROWTYPE; line api.picking_session_items%ROWTYPE; clean text;
+BEGIN
+ clean:=trim(COALESCE(p_barcode,'')); IF clean='' OR length(clean)>160 THEN RAISE EXCEPTION 'Invalid barcode'; END IF;
+ SELECT id INTO oid FROM api.pedidos WHERE pedido_num=trim(p_pedido_num) AND public_token=trim(p_token) AND public_token_expires_at>now() FOR UPDATE;
+ IF oid IS NULL THEN RAISE EXCEPTION 'Invalid or expired order link'; END IF;
+ sid:=api.ensure_picking_session(oid,p_operator);
+ SELECT * INTO bc FROM api.product_barcodes WHERE barcode=clean AND active=true;
+ IF bc.id IS NULL THEN INSERT INTO api.picking_scan_events(session_id,barcode,result,operator_name) VALUES(sid,clean,'UNKNOWN_BARCODE',left(COALESCE(p_operator,'picking'),80)); RETURN jsonb_build_object('ok',false,'reason','UNKNOWN_BARCODE','barcode',clean); END IF;
+ SELECT * INTO line FROM api.picking_session_items WHERE session_id=sid AND producto_id=bc.producto_id AND required_quantity-scanned_quantity>=bc.unit_factor ORDER BY id LIMIT 1 FOR UPDATE;
+ IF line.id IS NULL THEN
+  IF EXISTS(SELECT 1 FROM api.picking_session_items WHERE session_id=sid AND producto_id=bc.producto_id) THEN INSERT INTO api.picking_scan_events(session_id,barcode,result,operator_name,detail) VALUES(sid,clean,'OVER_PICK',left(COALESCE(p_operator,'picking'),80),jsonb_build_object('producto_id',bc.producto_id,'unit_factor',bc.unit_factor)); RETURN jsonb_build_object('ok',false,'reason','OVER_PICK','barcode',clean,'unit_factor',bc.unit_factor); END IF;
+  INSERT INTO api.picking_scan_events(session_id,barcode,result,operator_name,detail) VALUES(sid,clean,'NOT_IN_ORDER',left(COALESCE(p_operator,'picking'),80),jsonb_build_object('producto_id',bc.producto_id)); RETURN jsonb_build_object('ok',false,'reason','NOT_IN_ORDER','barcode',clean);
+ END IF;
+ UPDATE api.picking_session_items SET scanned_quantity=scanned_quantity+bc.unit_factor,updated_at=now() WHERE id=line.id;
+ INSERT INTO api.picking_scan_events(session_id,picking_item_id,barcode,result,operator_name,detail) VALUES(sid,line.id,clean,'ACCEPTED',left(COALESCE(p_operator,'picking'),80),jsonb_build_object('producto_id',bc.producto_id,'unit_factor',bc.unit_factor,'packaging_level',bc.packaging_level));
+ RETURN jsonb_build_object('ok',true,'reason','ACCEPTED','session_id',sid,'pedido_item_id',line.pedido_item_id,'scanned_quantity',line.scanned_quantity+bc.unit_factor,'required_quantity',line.required_quantity,'unit_factor',bc.unit_factor,'complete',NOT EXISTS(SELECT 1 FROM api.picking_session_items WHERE session_id=sid AND scanned_quantity<required_quantity));
 END $$;
 
 CREATE OR REPLACE VIEW api.v_inventory_receiving_scans AS
@@ -175,6 +201,6 @@ FROM api.inventory_receiving_scans s JOIN api.inventory_receiving_sessions r ON 
 GRANT SELECT,INSERT,UPDATE ON api.product_barcodes TO web_anon;
 GRANT USAGE,SELECT ON SEQUENCE api.product_barcodes_id_seq TO web_anon;
 GRANT SELECT ON api.inventory_receiving_sessions,api.inventory_receiving_scans,api.v_inventory_receiving_scans TO web_anon;
-GRANT EXECUTE ON FUNCTION api.gtin_check_digit(text),api.save_product_barcode(integer,text,text,text,numeric,text,boolean,text,text),api.create_inventory_receiving(integer,text,text,text),api.scan_inventory_receiving(bigint,text,numeric,text,text,date),api.post_inventory_receiving(bigint,text),api.void_inventory_receiving(bigint,text,text) TO web_anon;
+GRANT EXECUTE ON FUNCTION api.gtin_check_digit(text),api.save_product_barcode(integer,text,text,text,numeric,text,boolean,text,text),api.create_inventory_receiving(integer,text,text,text),api.scan_inventory_receiving(bigint,text,numeric,text,text,date),api.post_inventory_receiving(bigint,text),api.void_inventory_receiving(bigint,text,text),api.scan_picking_barcode(text,text,text,text) TO web_anon;
 NOTIFY pgrst,'reload schema';
 COMMIT;

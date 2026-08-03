@@ -21,8 +21,11 @@ class BarcodeReceivingContractTests(unittest.TestCase):
             self.assertIn(marker,SQL)
         post=SQL.split("FUNCTION api.post_inventory_receiving",1)[1].split("FUNCTION api.void_inventory_receiving",1)[0]
         self.assertIn("'RECEPCION'",post); self.assertIn("status='POSTED'",post)
+        self.assertIn("INSERT INTO api.lotes",post); self.assertIn("lote_id",post)
         void=SQL.split("FUNCTION api.void_inventory_receiving",1)[1].split("CREATE OR REPLACE VIEW",1)[0]
         self.assertIn("'AJUSTE_NEGATIVO'",void); self.assertIn("already been consumed",void)
+        picking=SQL.split("FUNCTION api.scan_picking_barcode",1)[1].split("CREATE OR REPLACE VIEW",1)[0]
+        self.assertIn("bc.unit_factor",picking); self.assertIn("required_quantity-scanned_quantity>=bc.unit_factor",picking)
 
     def test_admin_has_all_code_types_labels_and_scanner_flow(self):
         for marker in ('option>CODE128','option>QR','option>EAN13','option>GTIN14','def barcode_svg','action="/receiving/{session_id}/scan','Post receiving to stock'):
