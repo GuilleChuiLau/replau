@@ -42,6 +42,14 @@ different approver, and post only append-only `AJUSTE_POSITIVO` or
 `AJUSTE_NEGATIVO` ledger movements. Approval is rejected if stock changed after
 the snapshot. Full counts cannot be submitted with uncounted active products.
 
+After a product has a posted count, `/inventory-controls` can explicitly enable
+available-to-promise enforcement for that product and warehouse. Enforcement
+uses an advisory transaction lock to prevent concurrent over-reservation,
+subtracts active reservations and safety stock, and blocks order confirmation
+when the balance is insufficient. Reservation expiry defaults to preview-only;
+paid, preparing, and picked orders are protected, and released reservations
+must pass the same availability check before preparation can begin.
+
 ## URL
 
 ```text

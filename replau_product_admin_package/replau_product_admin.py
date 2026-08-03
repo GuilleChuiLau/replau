@@ -124,6 +124,7 @@ def erp_nav(auth_query: str = "") -> str:
         <a href="/barcodes{auth_query}">Barcodes</a>
         <a href="/receiving{auth_query}">Receiving</a>
         <a href="/inventory-counts{auth_query}">Stock Counts</a>
+        <a href="/inventory-controls{auth_query}">Availability</a>
         <a href="/procurement{auth_query}">Procurement</a>
         <a href="/menu" target="_blank">Public Menu</a>
       </div>
@@ -1039,6 +1040,7 @@ def html_page(title: str, body: str, flash: str = "", auth_query: str = "") -> H
         <a href="/barcodes{auth_query}">Barcodes</a>
         <a href="/receiving{auth_query}">Receiving</a>
         <a href="/inventory-counts{auth_query}">Stock Counts</a>
+        <a href="/inventory-controls{auth_query}">Availability</a>
         <a href="/procurement{auth_query}">Procurement</a>
         <a href="/bulk{auth_query}">Bulk CSV</a>
         <a href="/menu" target="_blank">Public Menu</a>
@@ -2061,6 +2063,39 @@ def inventory_count_void(session_id:int,request:Request,actor:str=Form(...),reas
     check_auth(request,x_admin_token)
     pg_rpc("void_inventory_count",{"p_session_id":session_id,"p_actor":actor,"p_reason":reason})
     return RedirectResponse(with_token(f"/inventory-counts/{session_id}?flash=Count+voided",request),303)
+
+
+@app.get("/inventory-controls",response_class=HTMLResponse)
+def inventory_controls_page(request:Request,flash:str="",x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> HTMLResponse:
+    check_auth(request,x_admin_token)
+    warehouses=pg_get("/almacenes?active=eq.true&select=id,codigo,nombre&order=id.asc")
+    products=get_products(active_filter="true");cols=product_columns()
+    controls=pg_get("/v_inventory_availability?select=*&order=product_name.asc")
+    expiries=pg_get("/v_expiring_stock_reservations?select=*&order=expires_at.asc&limit=500")
+    warehouse_options="".join(f'<option value="{int(w["id"])}">{esc(w.get("codigo"))} · {esc(w.get("nombre"))}</option>' for w in warehouses)
+    product_options_html="".join(f'<option value="{int(p["id"])}">{esc(get_product_code(p,cols))} · {esc(get_product_name(p,cols))}</option>' for p in products)
+    control_rows="".join(f'''<tr class="{'warn' if float(c.get('available_to_promise') or 0)<0 else ''}"><td>{esc(c.get('product_name'))}<br><span class="muted">{esc(c.get('cdg_prod'))}</span></td><td>{esc(c.get('warehouse_name'))}</td><td>{'ENFORCED' if c.get('enforcement_enabled') else 'MONITOR ONLY'}</td><td>{esc(c.get('stock_actual'))}</td><td>{esc(c.get('stock_reserved'))}</td><td>{esc(c.get('safety_stock'))}</td><td>{esc(c.get('available_to_promise'))}</td><td>{esc(c.get('reservation_ttl_minutes'))} min</td></tr>''' for c in controls)
+    expiry_rows="".join(f'''<tr class="{'warn' if r.get('eligible_for_expiry') else ''}"><td>{esc(r.get('pedido_num'))}</td><td>{esc(r.get('product_name'))}</td><td>{esc(r.get('cantidad_base'))}</td><td>{esc(r.get('order_status'))}</td><td>{esc(r.get('payment_status'))}</td><td>{esc(r.get('expires_at'))}</td><td>{'YES' if r.get('eligible_for_expiry') else 'No'}</td></tr>''' for r in expiries)
+    eligible=sum(1 for r in expiries if r.get("eligible_for_expiry"))
+    body=f'''<div class="card"><h2>Available-to-promise controls</h2><p class="muted">Enforcement is opt-in and requires a posted physical count from the last 30 days. Unconfigured products continue in monitor-only mode, so activating this page cannot unexpectedly stop all ordering.</p><form method="post" action="/inventory-controls{token_query(request)}"><div class="grid"><div><label>Warehouse</label><select name="warehouse_id">{warehouse_options}</select></div><div><label>Product</label><select name="product_id">{product_options_html}</select></div><div><label>Enforcement</label><select name="enabled"><option value="false">Monitor only</option><option value="true">Block insufficient orders</option></select></div><div><label>Safety stock</label><input type="number" name="safety_stock" min="0" step="0.001" value="0"></div><div><label>Reservation lifetime</label><input type="number" name="ttl_minutes" min="15" max="10080" value="120"></div><div><label>Manager</label><input name="actor" value="manager" required></div></div><label>Notes</label><input name="notes"><br><br><button>Save availability control</button></form></div><div class="card"><h2>Controlled availability</h2><table><thead><tr><th>Product</th><th>Warehouse</th><th>Mode</th><th>Actual</th><th>Reserved</th><th>Safety</th><th>Available</th><th>TTL</th></tr></thead><tbody>{control_rows or '<tr><td colspan="8">No products configured yet. Complete a count before enabling enforcement.</td></tr>'}</tbody></table></div><div class="card"><h2>Reservation expiry review</h2><p><strong>{eligible}</strong> reservation(s) are eligible. Paid orders, orders in preparation, and orders with picking activity are protected. Expired reservations are revalidated automatically before preparation.</p><div class="quick-actions"><form method="post" action="/inventory-controls/expire{token_query(request)}"><input type="hidden" name="dry_run" value="true"><input name="actor" value="manager" required><button>Preview expiry</button></form><form method="post" action="/inventory-controls/expire{token_query(request)}" onsubmit="return confirm('Release every eligible stale reservation? Orders will require stock revalidation before preparation.');"><input type="hidden" name="dry_run" value="false"><input name="actor" value="manager" required><button class="secondary">Release eligible reservations</button></form></div><table><thead><tr><th>Order</th><th>Product</th><th>Reserved</th><th>Order state</th><th>Payment</th><th>Expires</th><th>Eligible</th></tr></thead><tbody>{expiry_rows or '<tr><td colspan="7">No active reservations.</td></tr>'}</tbody></table></div>'''
+    return html_page("Inventory Availability",body,flash=flash,auth_query=token_query(request))
+
+
+@app.post("/inventory-controls")
+def inventory_control_save(request:Request,warehouse_id:int=Form(...),product_id:int=Form(...),enabled:str=Form("false"),safety_stock:float=Form(0),ttl_minutes:int=Form(120),actor:str=Form(...),notes:str=Form(""),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    pg_rpc("configure_inventory_stock_control",{"p_warehouse_id":warehouse_id,"p_product_id":product_id,"p_enabled":normalize_bool(enabled),"p_safety_stock":safety_stock,"p_ttl_minutes":ttl_minutes,"p_actor":actor,"p_notes":notes or None})
+    return RedirectResponse(with_token("/inventory-controls?flash=Availability+control+saved",request),303)
+
+
+@app.post("/inventory-controls/expire")
+def inventory_reservations_expire(request:Request,actor:str=Form(...),dry_run:str=Form("true"),x_admin_token:Optional[str]=Header(default=None,alias="X-Admin-Token")) -> RedirectResponse:
+    check_auth(request,x_admin_token)
+    preview=normalize_bool(dry_run)
+    result=pg_rpc("expire_stale_stock_reservations",{"p_actor":actor,"p_dry_run":preview})
+    count=int(result.get("candidate_count") or 0) if preview else int(result.get("released_count") or 0)
+    message=f'{count} eligible reservation(s)' if preview else f'{count} reservation(s) released'
+    return RedirectResponse(with_token(f"/inventory-controls?flash={quote(message,safe='')}",request),303)
 
 
 @app.get("/product/{product_id}", response_class=HTMLResponse)
