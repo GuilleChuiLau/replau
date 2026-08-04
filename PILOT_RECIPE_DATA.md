@@ -32,6 +32,12 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 -d localapi \
 The final query prints estimated unit food cost and gross margin against the
 current selling price.
 
+A fully generated simple-burger calibration example, including package prices,
+portion weights, opening quantities, lots, and expirations, is available in
+[`PILOT_BURGER_CALIBRATION.md`](PILOT_BURGER_CALIBRATION.md). Its stock and
+invoice fields are explicitly synthetic and must not be posted as real ledger
+movements.
+
 ## Before activation
 
 1. Replace estimated cost/kg with the latest supplier invoice cost, normalized

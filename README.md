@@ -62,3 +62,7 @@ A safe, inactive five-product starter dataset is documented in
 [`PILOT_RECIPE_DATA.md`](PILOT_RECIPE_DATA.md). It adds draft ingredient costs
 and portions without creating stock movements or enabling inventory
 enforcement.
+
+The generated `BURGER_SINGLE` invoice/portion/opening-stock estimate is in
+[`PILOT_BURGER_CALIBRATION.md`](PILOT_BURGER_CALIBRATION.md). Placeholder stock
+is deliberately excluded from the append-only live ledger.
