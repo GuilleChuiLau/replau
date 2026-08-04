@@ -57,3 +57,8 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 -d localapi \
 The Product Admin Ingredient Ledger shows automatic order consumption plus
 daily theoretical usage, recorded waste, actual usage, waste rate, and waste
 cost. Tests run inside a transaction and roll back all synthetic data.
+
+A safe, inactive five-product starter dataset is documented in
+[`PILOT_RECIPE_DATA.md`](PILOT_RECIPE_DATA.md). It adds draft ingredient costs
+and portions without creating stock movements or enabling inventory
+enforcement.
