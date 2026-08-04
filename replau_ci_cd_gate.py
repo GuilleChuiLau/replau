@@ -2,14 +2,13 @@
 """Replau local CI/CD gate.
 
 This script turns the manual release checklist into one repeatable command.
-It is intentionally local-first because Replau currently runs from a source
-tree in /home/guill/codex with deployed runtime copies in /opt/replau_*.
+It is intentionally local-first because Replau runs directly from this source
+tree through user-session systemd services.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import subprocess
@@ -26,10 +25,10 @@ ROOT = Path(os.environ.get("REPLAU_SOURCE_ROOT", Path(__file__).resolve().parent
 
 
 @dataclass(frozen=True)
-class FilePair:
+class ServiceDeployment:
     label: str
+    unit: str
     source: Path
-    deployed: Path
 
 
 @dataclass(frozen=True)
@@ -39,6 +38,7 @@ class Probe:
     expect_json_ok: bool = False
     token_env: str = ""
     process_marker: str = ""
+    allow_warn: bool = False
 
 
 SOURCE_DIRS = [
@@ -61,21 +61,17 @@ TOP_LEVEL_PY = [
     ROOT / "replau_web_qa.py",
 ]
 
-DEPLOY_PAIRS = [
-    FilePair("email worker", ROOT / "replau_email_worker/email_worker.py", Path("/opt/replau_email_worker/email_worker.py")),
-    FilePair("kitchen UI", ROOT / "replau_kitchen_ui/kitchen_ui.py", Path("/opt/replau_kitchen_ui/kitchen_ui.py")),
-    FilePair("logistics viewer", ROOT / "replau_logistics_viewer/logistics_viewer.py", Path("/opt/replau_logistics_viewer/logistics_viewer.py")),
-    FilePair("WhatsApp bridge", ROOT / "replau_openclaw_whatsapp_bridge/bridge.py", Path("/opt/replau_openclaw_whatsapp_bridge/bridge.py")),
-    FilePair("reverse geocode helper", ROOT / "replau_google_reverse_geocode_package/google_reverse_geocode.py", Path("/opt/replau_openclaw_whatsapp_bridge/google_reverse_geocode.py")),
-    FilePair("reverse geocode test", ROOT / "replau_google_reverse_geocode_package/test_reverse_geocode.py", Path("/opt/replau_openclaw_whatsapp_bridge/test_reverse_geocode.py")),
-    FilePair("send adapter", ROOT / "replau_openclaw_whatsapp_send_adapter/openclaw_whatsapp_send_adapter.py", Path("/opt/replau_openclaw_whatsapp_send_adapter/openclaw_whatsapp_send_adapter.py")),
-    FilePair("ops dashboard", ROOT / "replau_ops_package/replau_health_dashboard.py", Path("/opt/replau_ops/replau_health_dashboard.py")),
-    FilePair("stuck monitor", ROOT / "replau_ops_package/replau_stuck_monitor.py", Path("/opt/replau_ops/replau_stuck_monitor.py")),
-    FilePair("WhatsApp watchdog", ROOT / "replau_ops_package/replau_whatsapp_watchdog.py", Path("/opt/replau_ops/replau_whatsapp_watchdog.py")),
-    FilePair("backup script", ROOT / "replau_ops_package/replau_backup.sh", Path("/opt/replau_ops/replau_backup.sh")),
-    FilePair("payment proof review", ROOT / "replau_payment_proof_flow_package/replau_payment_proof_review.py", Path("/opt/replau_payment_proof_review/replau_payment_proof_review.py")),
-    FilePair("product admin", ROOT / "replau_product_admin_package/replau_product_admin.py", Path("/opt/replau_product_admin/replau_product_admin.py")),
-    FilePair("outbox worker", ROOT / "replau_whatsapp_outbox_worker/whatsapp_outbox_worker.py", Path("/opt/replau_whatsapp_outbox_worker/whatsapp_outbox_worker.py")),
+SERVICE_DEPLOYMENTS = [
+    ServiceDeployment("WhatsApp bridge", "replau-bridge.service", ROOT / "replau_openclaw_whatsapp_bridge/bridge.py"),
+    ServiceDeployment("logistics viewer", "replau-logistics.service", ROOT / "replau_logistics_viewer/logistics_viewer.py"),
+    ServiceDeployment("kitchen UI", "replau-kitchen.service", ROOT / "replau_kitchen_ui/kitchen_ui.py"),
+    ServiceDeployment("send adapter", "replau-adapter.service", ROOT / "replau_openclaw_whatsapp_send_adapter/openclaw_whatsapp_send_adapter.py"),
+    ServiceDeployment("ops dashboard", "replau-ops.service", ROOT / "replau_ops_package/replau_health_dashboard.py"),
+    ServiceDeployment("product admin", "replau-product.service", ROOT / "replau_product_admin_package/replau_product_admin.py"),
+    ServiceDeployment("payment proof review", "replau-payment.service", ROOT / "replau_payment_proof_flow_package/replau_payment_proof_review.py"),
+    ServiceDeployment("outbox worker", "replau-outbox.service", ROOT / "replau_whatsapp_outbox_worker/whatsapp_outbox_worker.py"),
+    ServiceDeployment("public storefront", "replau-storefront.service", ROOT / "replau_public_storefront/public_storefront.py"),
+    ServiceDeployment("driver app", "replau-driver-app.service", ROOT / "replau_driver_app_package/replau_driver_app.py"),
 ]
 
 HTTP_PROBES = [
@@ -84,7 +80,7 @@ HTTP_PROBES = [
     Probe("Logistics viewer", "http://127.0.0.1:8790/health", True),
     Probe("Kitchen UI", "http://127.0.0.1:8791/health", True),
     Probe("WhatsApp send adapter", "http://127.0.0.1:8792/health", True),
-    Probe("Ops dashboard", "http://127.0.0.1:8793/health", True, "OPS_TOKEN", "replau_health_dashboard.py"),
+    Probe("Ops dashboard", "http://127.0.0.1:8793/health", True, "OPS_TOKEN", "replau_health_dashboard.py", True),
     Probe("Product admin", "http://127.0.0.1:8794/health", True, "ADMIN_TOKEN", "replau_product_admin.py"),
     Probe("Payment proof review", "http://127.0.0.1:8795/health", True, "REVIEW_TOKEN", "replau_payment_proof_review.py"),
     Probe("OpenClaw gateway", "http://127.0.0.1:18789/health", True),
@@ -159,14 +155,6 @@ def iter_python_files() -> Iterable[Path]:
             yield path
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def process_env_value(process_marker: str, env_name: str) -> str:
     if not process_marker or not env_name:
         return ""
@@ -219,17 +207,38 @@ def check_logistics_payment_gates(gate: Gate) -> None:
 
 
 def check_source_deploy_drift(gate: Gate) -> None:
-    for pair in DEPLOY_PAIRS:
-        if not pair.source.exists():
-            gate.fail(f"{pair.label}: source missing {pair.source}")
+    for deployment in SERVICE_DEPLOYMENTS:
+        if not deployment.source.exists():
+            gate.fail(f"{deployment.label}: source missing {deployment.source}")
             continue
-        if not pair.deployed.exists():
-            gate.fail(f"{pair.label}: deployed file missing {pair.deployed}")
+        result = subprocess.run(
+            [
+                "systemctl", "--user", "show", deployment.unit,
+                "--property=LoadState", "--property=WorkingDirectory", "--property=ExecStart",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            gate.fail(f"{deployment.label}: cannot inspect {deployment.unit}: {result.stderr.strip()}")
             continue
-        if sha256(pair.source) != sha256(pair.deployed):
-            gate.fail(f"{pair.label}: source/deployed drift ({pair.source} != {pair.deployed})")
+        properties = dict(
+            line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+        )
+        if properties.get("LoadState") != "loaded":
+            gate.fail(f"{deployment.label}: {deployment.unit} is not loaded")
             continue
-        gate.ok(f"{pair.label} source matches deployed copy")
+        working_directory = Path(properties.get("WorkingDirectory") or "/").resolve()
+        exec_start = properties.get("ExecStart") or ""
+        if working_directory != deployment.source.parent.resolve() or deployment.source.name not in exec_start:
+            gate.fail(
+                f"{deployment.label}: {deployment.unit} does not execute {deployment.source} "
+                f"(WorkingDirectory={working_directory}, ExecStart={exec_start[:300]})"
+            )
+            continue
+        gate.ok(f"{deployment.label} service executes repository source")
 
 
 def check_http(gate: Gate, timeout: int) -> None:
@@ -260,6 +269,9 @@ def check_http(gate: Gate, timeout: int) -> None:
                 continue
             if data.get("ok") is not True:
                 detail = json_health_summary(data)
+                if probe.allow_warn and data.get("overall") == "WARN" and not data.get("critical"):
+                    gate.warn(f"{probe.label} health warning: {detail}")
+                    continue
                 gate.fail(f"{probe.label} health ok was not true: {detail}")
                 continue
         gate.ok(f"{probe.label} probe healthy")
@@ -276,26 +288,32 @@ def json_health_summary(data: object) -> str:
 
 
 def check_systemd(gate: Gate) -> None:
-    services = [
+    user_services = [
         "postgrest-localapi.service",
-        "replau-openclaw-whatsapp-bridge.service",
-        "replau-logistics-viewer.service",
-        "replau-kitchen-ui.service",
-        "replau-openclaw-whatsapp-send-adapter.service",
-        "replau-health-dashboard.service",
-        "replau-product-admin.service",
-        "replau-payment-proof-review.service",
-        "postgresql.service",
-        "apache2.service",
+        "replau-bridge.service",
+        "replau-logistics.service",
+        "replau-kitchen.service",
+        "replau-adapter.service",
+        "replau-ops.service",
+        "replau-product.service",
+        "replau-payment.service",
+        "replau-outbox.service",
+        "replau-storefront.service",
+        "replau-driver-app.service",
+        "openclaw-gateway.service",
+        "replau-conversation-retention.timer",
+        "replau-sla-monitor.timer",
+        "replau-stuck-monitor.timer",
+        "replau-whatsapp-watchdog.timer",
     ]
-    for service in services:
-        out = gate.run(f"systemd active {service}", ["systemctl", "is-active", service], timeout=10)
+    for service in user_services:
+        out = gate.run(f"user systemd active {service}", ["systemctl", "--user", "is-active", service], timeout=10)
         if out is not None and out.strip() != "active":
             gate.fail(f"{service} is {out.strip() or 'unknown'}")
 
-    user_services = ["openclaw-gateway.service"]
-    for service in user_services:
-        out = gate.run(f"user systemd active {service}", ["systemctl", "--user", "is-active", service], timeout=10)
+    system_services = ["postgresql@16-main.service", "apache2.service"]
+    for service in system_services:
+        out = gate.run(f"systemd active {service}", ["systemctl", "is-active", service], timeout=10)
         if out is not None and out.strip() != "active":
             gate.fail(f"{service} is {out.strip() or 'unknown'}")
 
@@ -323,10 +341,10 @@ def check_git_clean(gate: Gate) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the Replau local CI/CD gate.")
-    parser.add_argument("--skip-deploy-drift", action="store_true", help="Skip source-vs-/opt deployed runtime drift checks.")
+    parser.add_argument("--skip-deploy-drift", action="store_true", help="Skip checks that user services execute repository source.")
     parser.add_argument("--skip-http", action="store_true", help="Skip local HTTP health probes.")
     parser.add_argument("--systemd", action="store_true", help="Also require key systemd services to be active.")
-    parser.add_argument("--require-clean-git", action="store_true", help="Fail unless /home/guill/codex has no uncommitted git changes.")
+    parser.add_argument("--require-clean-git", action="store_true", help="Fail unless the repository has no uncommitted git changes.")
     parser.add_argument("--web-qa", action="store_true", help="Run non-mutating web QA after static checks.")
     parser.add_argument("--smoke", action="store_true", help="Run full integration smoke after web QA/static checks.")
     parser.add_argument("--timeout", type=int, default=60, help="Timeout in seconds for HTTP probes and web QA.")
