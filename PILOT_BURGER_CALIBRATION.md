@@ -38,3 +38,20 @@ They must not be posted to the append-only live ingredient ledger. Doing so
 would create fictional inventory that can only be corrected by compensating
 movements. The already deployed costs and recipe grams may remain as inactive
 planning estimates until physical measurements replace them.
+
+## Rollback-only end-to-end simulation
+
+The generated data can exercise the real scanner flow without becoming live
+inventory:
+
+```bash
+cd /home/guill/.openclaw/workspace/replau
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d localapi \
+  -f postgrest_local/test_pilot_burger_rollback_simulation.sql
+```
+
+The contract temporarily activates the recipe and enforcement, posts the seven
+generated opening lots, scans two burgers, completes picking, validates 0.492 kg
+and S/9.2390 of ingredient consumption, checks idempotency and 18 remaining
+burger units, then rolls back. Post-rollback assertions reject any retained
+synthetic order, customer, lot, movement, activation, or enforcement state.

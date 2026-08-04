@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT=Path(__file__).parents[1]
 SQL=(ROOT/"postgrest_local/add_recipe_consumption_variance.sql").read_text()
 CONTRACT=(ROOT/"postgrest_local/test_recipe_consumption_variance.sql").read_text()
+PILOT_CONTRACT=(ROOT/"postgrest_local/test_pilot_burger_rollback_simulation.sql").read_text()
 SOURCE=(ROOT/"replau_product_admin_package/replau_product_admin.py").read_text()
 
 class RecipeConsumptionVarianceTests(unittest.TestCase):
@@ -40,5 +41,22 @@ class RecipeConsumptionVarianceTests(unittest.TestCase):
         self.assertIn("Recipe consumption was not idempotent",CONTRACT)
         self.assertIn("Ingredient variance report failed",CONTRACT)
         self.assertIn("ROLLBACK;",CONTRACT)
+
+    def test_generated_burger_simulation_scans_validates_and_rolls_back(self):
+        for marker in (
+            "api.scan_picking_barcode",
+            "api.complete_scanner_picking",
+            "0.492",
+            "9.2390",
+            "v_remaining_units <> 18",
+            "already_posted",
+            "ROLLBACK;",
+            "Rollback retained the synthetic order",
+            "Rollback retained generated ingredient movements",
+            "Rollback left the pilot recipe active",
+            "Rollback left pilot ingredient enforcement enabled",
+        ):
+            self.assertIn(marker,PILOT_CONTRACT)
+        self.assertEqual(PILOT_CONTRACT.count("api.scan_picking_barcode("),2)
 
 if __name__=="__main__":unittest.main()

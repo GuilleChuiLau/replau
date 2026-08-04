@@ -66,3 +66,7 @@ enforcement.
 The generated `BURGER_SINGLE` invoice/portion/opening-stock estimate is in
 [`PILOT_BURGER_CALIBRATION.md`](PILOT_BURGER_CALIBRATION.md). Placeholder stock
 is deliberately excluded from the append-only live ledger.
+
+Its rollback-only scanner simulation is
+`postgrest_local/test_pilot_burger_rollback_simulation.sql`; it validates a
+two-burger pick and exact recipe consumption without retaining synthetic state.
