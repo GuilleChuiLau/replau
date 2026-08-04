@@ -73,6 +73,14 @@ class LogisticsPaymentGateContractTests(unittest.TestCase):
         ):
             self.assertIn(marker,SOURCE)
 
+    def test_route_api_selects_an_assignment_with_driver_coordinates(self) -> None:
+        route_block = SOURCE.split('def api_route(', 1)[1].split('@app.get("/order/{pedido_num}"', 1)[0]
+        self.assertIn('assignment = fetch_route_assignment(order)', route_block)
+        self.assertIn('def fetch_route_assignment(', SOURCE)
+        self.assertIn('== "ENTREGADO"', SOURCE)
+        self.assertIn('&driver_latitude=not.is.null&driver_longitude=not.is.null', SOURCE)
+        self.assertIn('&order=driver_location_at.desc.nullslast,created_at.desc&limit=1', SOURCE)
+
     def test_picking_can_handoff_directly_to_delivery_matching(self) -> None:
         for marker in (
             'action="/ops/picking/handoff-delivery"',

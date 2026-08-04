@@ -213,10 +213,19 @@ class QA:
                 continue
             rows = self.get_json(
                 self.cfg.postgrest
-                + f"/v_pedidos_logistica?pedido_num=eq.{pedido_num}&select=pedido_num,order_url,latitud,longitud&limit=1"
+                + f"/v_pedidos_logistica?pedido_num=eq.{pedido_num}&select=pedido_num,order_url,latitud,longitud,estado&limit=1"
             )
             if not rows or rows[0].get("latitud") is None or rows[0].get("longitud") is None:
                 continue
+            if str(rows[0].get("estado") or "").upper() != "ENTREGADO":
+                latest = self.get_json(
+                    self.cfg.postgrest
+                    + f"/v_delivery_asignaciones?pedido_num=eq.{pedido_num}"
+                    + "&status=in.(ASSIGNED,ACCEPTED,PICKED_UP,EN_ROUTE,ARRIVED,FAILED,COMPLETED,OFFERED)"
+                    + "&select=driver_latitude,driver_longitude&order=created_at.desc&limit=1"
+                )
+                if not latest or latest[0].get("driver_latitude") is None or latest[0].get("driver_longitude") is None:
+                    continue
             token_match = re.search(r"[?&]token=([^&]+)", rows[0].get("order_url") or "")
             if token_match:
                 return str(pedido_num), token_match.group(1)
@@ -276,8 +285,8 @@ class QA:
                 self.check_links(name, url, got[1])
         if "logistics delivery station" in parsed_pages:
             html, _, _ = parsed_pages["logistics delivery station"]
-            needles = ["Delivery Station", "Dispatch Board", "Sin repartidor"]
-            if "Sin pedidos para delivery" not in html:
+            needles = ["Delivery Station", "Repartidores disponibles", "Matching"]
+            if "No hay pedidos listos para delivery." not in html:
                 needles.extend(["Ofrecer repartidor", "Clear"])
             for needle in needles:
                 if needle not in html:
@@ -504,10 +513,13 @@ class QA:
             self.ok("ops owner command API reachable")
         else:
             self.fail("ops owner command API invalid")
-        if isinstance(owner, dict) and owner.get("recipe_count", 0) > 0 and isinstance(owner.get("margin_rows"), list) and owner.get("margin_rows"):
-            self.ok("ops owner command includes recipe margin signals")
+        if isinstance(owner, dict) and owner.get("recipe_count", 0) > 0:
+            if isinstance(owner.get("margin_rows"), list) and owner.get("margin_rows"):
+                self.ok("ops owner command includes recipe margin signals")
+            else:
+                self.fail("ops owner command missing recipe margin signals")
         else:
-            self.fail("ops owner command missing recipe margin signals")
+            self.warn("Ops recipe margin signals skipped: no active recipes")
         purchase = self.get_json(self.ops_url("/api/purchase-agent"))
         if isinstance(purchase, dict) and purchase.get("ok") and isinstance(purchase.get("recommendations"), list) and isinstance(purchase.get("ingredient_behavior"), list):
             self.ok("ops purchase agent API reachable")

@@ -28,7 +28,35 @@ def esc(value: Any) -> str:
     return html.escape(str(value))
 
 
+def configured_service_token(env_name: str) -> str:
+    """Load a target service token without depending on cross-process /proc access."""
+    direct = os.environ.get(f"TARGET_{env_name}", "").strip()
+    if direct:
+        return direct
+    filename = {"OPS_TOKEN": "ops.env", "ADMIN_TOKEN": "product.env", "REVIEW_TOKEN": "payment.env"}.get(env_name)
+    if not filename:
+        return ""
+    env_dir = Path(os.environ.get("REPLAU_TOKEN_ENV_DIR", "/home/guill/.config/replau"))
+    try:
+        for raw_line in (env_dir / filename).read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == env_name:
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                return value.strip()
+    except OSError:
+        pass
+    return ""
+
+
 def proc_env_token(script_name: str, env_name: str) -> str:
+    configured = configured_service_token(env_name)
+    if configured:
+        return configured
     for proc in Path("/proc").iterdir():
         if not proc.name.isdigit():
             continue

@@ -18,7 +18,7 @@ from urllib.parse import quote
 import requests
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from pydantic import BaseModel, Field
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 POSTGREST_BASE_URL = os.environ.get("POSTGREST_BASE_URL", "http://127.0.0.1:3000").rstrip("/")
 WHATSAPP_NUMBER = "".join(c for c in os.environ.get("PUBLIC_WHATSAPP_NUMBER", "51973875456") if c.isdigit())
@@ -296,6 +296,15 @@ def health() -> dict[str, Any]:
 @app.get("/api/menu")
 def api_menu() -> JSONResponse:
     return JSONResponse({"ok": True, "store": STORE_NAME, "items": menu_items()})
+
+
+@app.get("/order/{order_ref:path}", include_in_schema=False)
+def legacy_order_redirect(order_ref: str, request: Request) -> RedirectResponse:
+    """Keep generated public order URLs useful without exposing staff views."""
+    target = "/track/" + quote(order_ref.strip("/"), safe="/")
+    if request.url.query:
+        target += "?" + request.url.query
+    return RedirectResponse(target, status_code=307)
 
 
 @app.get("/api/store-status")

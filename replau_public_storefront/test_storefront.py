@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from starlette.requests import Request
 
-from public_storefront import CheckoutItem, CheckoutRequest, api_checkout, api_reverse_geocode, checkout_items, menu_items, proof_file_signature_ok, safe_tracking_url, storefront
+from public_storefront import CheckoutItem, CheckoutRequest, api_checkout, api_reverse_geocode, checkout_items, legacy_order_redirect, menu_items, proof_file_signature_ok, safe_tracking_url, storefront
 
 
 def main() -> None:
@@ -45,6 +45,19 @@ def main() -> None:
     assert proof_file_signature_ok("application/pdf", b"%PDF-1.7")
     assert not proof_file_signature_ok("image/png", b"not-a-png")
     assert safe_tracking_url("https://orders.replau.com/order/token") == "https://orders.replau.com/track/token"
+    redirect_request = Request(
+        {
+            "type": "http",
+            "scheme": "https",
+            "server": ("orders.replau.com", 443),
+            "path": "/order/PED-TEST",
+            "query_string": b"token=signed-token",
+            "headers": [],
+        }
+    )
+    redirect = legacy_order_redirect("PED-TEST", redirect_request)
+    assert redirect.status_code == 307
+    assert redirect.headers["location"] == "/track/PED-TEST?token=signed-token"
     first = items[0]
     payload = CheckoutRequest(
         customer_name="Cliente prueba", phone="973875456", fulfillment="PICKUP",

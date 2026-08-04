@@ -112,6 +112,14 @@ class MenuIntentTest(unittest.TestCase):
         self.assertEqual(len(keys), 1)
         self.assertTrue(keys[0].endswith(":51999999995"))
 
+    def test_human_handoff_bypasses_automated_rate_limit_reply(self):
+        inbound = self.bridge.NormalizedWebhook(whatsapp_number="51999999996", message_text="necesito ayuda")
+        with patch.object(self.bridge, "active_handoff_entry", return_value={"active": True}), patch.object(
+            self.bridge, "inbound_rate_limit_reason", return_value="burst"
+        ) as limiter:
+            self.assertIsNone(self.bridge.webhook_rate_limit_reason(inbound))
+        limiter.assert_not_called()
+
     def test_same_phone_uses_distinct_conversation_paths_for_two_accounts(self):
         first = self.bridge.ConversationIdentity("whatsapp", "whatsapp-account:first", "51999999999", "first")
         second = self.bridge.ConversationIdentity("whatsapp", "whatsapp-account:second", "51999999999", "second")
@@ -162,6 +170,20 @@ class MenuIntentTest(unittest.TestCase):
         self.assertEqual(inbound.message_type, "text")
         self.assertIsNone(inbound.latitude)
         self.assertIsNone(inbound.longitude)
+
+    def test_location_payload_without_message_text_is_accepted(self):
+        inbound = self.bridge.extract_payload(
+            {
+                "whatsapp_number": "51999999999",
+                "message_type": "location",
+                "latitude": -12.1199,
+                "longitude": -76.9917,
+            }
+        )
+        self.assertEqual(inbound.message_type, "location")
+        self.assertIsNone(inbound.message_text)
+        self.assertEqual(inbound.latitude, -12.1199)
+        self.assertEqual(inbound.longitude, -76.9917)
 
     def test_signed_web_handoff_links_order_from_any_conversation_state(self):
         message = (

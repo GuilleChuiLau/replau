@@ -72,6 +72,31 @@ GOOGLE_ROUTES_URL = os.environ.get(
 app = FastAPI(title="Replau Logistics Viewer", version="1.1.0")
 
 
+def configured_service_token(env_name: str) -> str:
+    """Load a target service token without depending on cross-process /proc access."""
+    direct = os.environ.get(f"TARGET_{env_name}", "").strip()
+    if direct:
+        return direct
+    filename = {"OPS_TOKEN": "ops.env", "ADMIN_TOKEN": "product.env", "REVIEW_TOKEN": "payment.env"}.get(env_name)
+    if not filename:
+        return ""
+    env_dir = Path(os.environ.get("REPLAU_TOKEN_ENV_DIR", "/home/guill/.config/replau"))
+    try:
+        for raw_line in (env_dir / filename).read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == env_name:
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                return value.strip()
+    except OSError:
+        pass
+    return ""
+
+
 
 def tokenized_local_service_url(base: str, process_marker: str, token_env: str, path: str = "") -> str:
     """Return local protected service URL with its token when visible from this host."""
@@ -80,6 +105,10 @@ def tokenized_local_service_url(base: str, process_marker: str, token_env: str, 
         base = base.rstrip("/") + "/" + path.strip("/")
     if "token=" in base:
         return base
+    configured = configured_service_token(token_env)
+    if configured:
+        sep = "&" if "?" in base else "?"
+        return base + sep + "token=" + quote(configured, safe="")
     try:
         for proc in Path("/proc").iterdir():
             if not proc.name.isdigit():
@@ -2377,7 +2406,7 @@ def render_delivery_page(data: Dict[str, Any], token: str) -> str:
 
       {render_driver_assignment_panel(order.get('id'), token)}
 
-      {render_delivery_map_panel(order, fetch_delivery_assignment(order.get('id')), 'Mapa de entrega', token)}
+      {render_delivery_map_panel(order, fetch_route_assignment(order), 'Mapa de entrega', token)}
 
       <div class="panel priority-red">
         <div class="panel-head"><h2>Ruta y entrega</h2><div class="panel-sub">Usa Maps, confirma salida, y marca entrega al final.</div></div>
@@ -2717,15 +2746,20 @@ def render_delivery_ops_panel() -> str:
     """
 
 
-def fetch_delivery_assignment(pedido_id: Any) -> Dict[str, Any] | None:
+def fetch_delivery_assignment(pedido_id: Any, require_driver_location: bool = False) -> Dict[str, Any] | None:
     if pedido_id is None:
         return None
     try:
-        rows = pg_get(
+        query = (
             f"/v_delivery_asignaciones?pedido_id=eq.{pedido_id}"
             "&status=in.(ASSIGNED,ACCEPTED,PICKED_UP,EN_ROUTE,ARRIVED,FAILED,COMPLETED,OFFERED)"
-            "&order=created_at.desc&limit=1"
         )
+        if require_driver_location:
+            query += "&driver_latitude=not.is.null&driver_longitude=not.is.null"
+            query += "&order=driver_location_at.desc.nullslast,created_at.desc&limit=1"
+        else:
+            query += "&order=created_at.desc&limit=1"
+        rows = pg_get(query)
         return rows[0] if rows else None
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else None
@@ -2744,6 +2778,18 @@ def parse_coord(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def fetch_route_assignment(order: Dict[str, Any], current: Dict[str, Any] | None = None) -> Dict[str, Any] | None:
+    """Use historical coordinates only for a completed order, never for an active delivery."""
+    current = current or fetch_delivery_assignment(order.get("id"))
+    if parse_coord((current or {}).get("driver_latitude")) is not None and parse_coord(
+        (current or {}).get("driver_longitude")
+    ) is not None:
+        return current
+    if str(order.get("estado") or "").upper() == "ENTREGADO":
+        return fetch_delivery_assignment(order.get("id"), require_driver_location=True)
+    return current
 
 
 def parse_google_duration_seconds(value: Any) -> int | None:
@@ -3142,7 +3188,7 @@ def render_tracking_page(data: Dict[str, Any], token: str) -> str:
         <div class="actions">{destino_link}</div>
       </div>
 
-      {render_delivery_map_panel(order, assignment, 'Mapa de tracking', token)}
+      {render_delivery_map_panel(order, fetch_route_assignment(order, assignment), 'Mapa de tracking', token)}
 
       {assignment_panel}
     </div>
@@ -3398,7 +3444,7 @@ def api_route(pedido_num: str, token: str = Query(...)) -> JSONResponse:
     except requests.HTTPError as exc:
         raise HTTPException(status_code=500, detail=exc.response.text)
     order = data.get("order") or {}
-    assignment = fetch_delivery_assignment(order.get("id"))
+    assignment = fetch_route_assignment(order)
     customer_lat = parse_coord(order.get("latitud"))
     customer_lon = parse_coord(order.get("longitud"))
     driver_lat = parse_coord((assignment or {}).get("driver_latitude"))

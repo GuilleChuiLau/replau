@@ -183,10 +183,12 @@ class Runner:
             self.fail("bridge quote flow", f"unexpected state {first.get('next_state')}: {first}")
         self.log("bridge quote flow", "WAITING_PAYMENT_AND_LOCATION")
 
-        pay = self.bridge_webhook({"whatsapp_number": phone, "message_type": "text", "message_text": "Yape"})
+        pay = self.bridge_webhook(
+            {"whatsapp_number": phone, "message_type": "text", "message_text": "Contra entrega"}
+        )
         if pay.get("next_state") != "WAITING_PAYMENT_AND_LOCATION":
             self.fail("bridge payment flow", f"unexpected state {pay.get('next_state')}: {pay}")
-        self.log("bridge payment flow", "payment accepted")
+        self.log("bridge payment flow", "cash on delivery accepted")
 
         loc = self.bridge_webhook(
             {
@@ -402,6 +404,47 @@ class Runner:
         # Give in-flight attempts a moment to finish, then cancel anything still active.
         time.sleep(1)
 
+        pedido_num = str(self.created.get("pedido_num") or "")
+        order_url = str(self.created.get("order_url") or "")
+        token = (parse_qs(urlparse(order_url).query).get("token") or [""])[0]
+        if not pedido_num or not token:
+            self.fail("Smoke cleanup order", "missing synthetic order number or token")
+        cancelled = self.pg_rpc(
+            "actualizar_estado_pedido_publico",
+            {"p_pedido_num": pedido_num, "p_token": token, "p_estado": "ANULADO"},
+        )
+        if not cancelled.get("ok"):
+            self.fail("Smoke cleanup order", json.dumps(cancelled, ensure_ascii=False)[:800])
+        self.log("Smoke cleanup order", "ANULADO; stock reservations released")
+
+        phone = str(self.created.get("phone") or "")
+        for endpoint, key in (
+            ("whatsapp_conversation_states", "customer_address"),
+            ("whatsapp_conversaciones", "whatsapp_number"),
+        ):
+            response = self.patch(
+                self.cfg.postgrest + f"/{endpoint}?{key}=eq.{phone}",
+                json={"estado": "CANCELLED", "pedido_borrador": None},
+                headers={"Prefer": "return=minimal"},
+            )
+            if not response.ok:
+                self.fail("Smoke cleanup conversation", f"{endpoint} HTTP {response.status_code}: {response.text[:400]}")
+        open_requests = self.pg_get(
+            f"/whatsapp_conversation_requests?customer_address=eq.{phone}"
+            "&status=not.in.(CLOSED,BLOCKED)&select=id"
+        )
+        for request_row in open_requests:
+            self.pg_rpc(
+                "update_whatsapp_request_inbox",
+                {
+                    "p_request_id": request_row["id"],
+                    "p_action": "CLOSE",
+                    "p_actor": "integration-smoke-cleanup",
+                    "p_note": "Closed after controlled integration smoke test.",
+                },
+            )
+        self.log("Smoke cleanup conversation", f"closed {len(open_requests)} request(s)")
+
         outbox_response = self.patch(
             self.cfg.postgrest + f"/whatsapp_outbox?pedido_id=eq.{pedido_id}&status=in.(PENDING,SENDING,ERROR)",
             json={
@@ -466,14 +509,17 @@ class Runner:
         self.log("Smoke cleanup", f"cancelled {len(outbox_rows)} WhatsApp row(s), neutralized {email_rows_count} email row(s)")
 
     def run(self) -> None:
-        self.health_checks()
-        self.product_quote_checks()
-        self.conversation_order_flow()
-        self.human_handoff_flow()
-        self.neutralize_test_email_queues()
-        self.downstream_checks()
-        self.send_adapter_dry_run()
-        self.neutralize_test_outbound_queues()
+        try:
+            self.health_checks()
+            self.product_quote_checks()
+            self.conversation_order_flow()
+            self.human_handoff_flow()
+            self.neutralize_test_email_queues()
+            self.downstream_checks()
+            self.send_adapter_dry_run()
+        finally:
+            if self.created.get("pedido_id"):
+                self.neutralize_test_outbound_queues()
         print("\nSUMMARY")
         print(json.dumps({"ok": True, "created": self.created, "steps": self.steps}, indent=2, ensure_ascii=False))
 

@@ -224,6 +224,13 @@ def inbound_rate_limit_reason(inbound: "NormalizedWebhook", now: Optional[float]
         return None
 
 
+def webhook_rate_limit_reason(inbound: "NormalizedWebhook") -> Optional[str]:
+    """Human-managed conversations must never receive an automated limit reply."""
+    if active_handoff_entry(conversation_identity_from_inbound(inbound)):
+        return None
+    return inbound_rate_limit_reason(inbound)
+
+
 class NormalizedWebhook(BaseModel):
     whatsapp_number: str = Field(..., description="Customer WhatsApp number, e.g. 51999999999")
     message_type: str = Field("text", description="text, location, image, or document")
@@ -713,7 +720,8 @@ def extract_payload(data: Dict[str, Any]) -> NormalizedWebhook:
     # A web-order handoff can contain a Google Maps URL as one field.  It is
     # still a structured text message; promoting the whole payload to a
     # location discards the customer, items, address, and payment fields.
-    first_line = normalize_loose_text(str(message_text or "").splitlines()[0])
+    message_lines = str(message_text or "").splitlines()
+    first_line = normalize_loose_text(message_lines[0] if message_lines else "")
     is_structured_web_order = first_line.startswith("pedido web confirmado")
     if latitude is None and longitude is None and not is_structured_web_order:
         parsed_latitude, parsed_longitude = parse_location_from_text(message_text)
@@ -3421,7 +3429,7 @@ async def whatsapp_webhook(request: Request, x_hook_token: Optional[str] = Heade
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
     try:
         inbound = extract_payload(data)
-        rate_limit_reason = inbound_rate_limit_reason(inbound)
+        rate_limit_reason = webhook_rate_limit_reason(inbound)
         if rate_limit_reason:
             identity = conversation_identity_from_inbound(inbound)
             logging.warning(
