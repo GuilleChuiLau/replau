@@ -12,6 +12,8 @@ ROOT = Path(__file__).parents[1]
 MIGRATION = (ROOT / "postgrest_local/add_whatsapp_outbound_policy.sql").read_text()
 CONTRACT = (ROOT / "postgrest_local/test_whatsapp_outbound_policy.sql").read_text()
 BRIDGE = (ROOT / "replau_openclaw_whatsapp_bridge/bridge.py").read_text()
+STRUCTURED_MIGRATION = (ROOT / "postgrest_local/add_whatsapp_structured_messages.sql").read_text()
+STRUCTURED_CONTRACT = (ROOT / "postgrest_local/test_whatsapp_structured_messages.sql").read_text()
 
 
 class WhatsAppOutboundPolicyTests(unittest.TestCase):
@@ -21,6 +23,7 @@ class WhatsAppOutboundPolicyTests(unittest.TestCase):
             "pedido_id": 5,
             "whatsapp_number": "51999999999",
             "message_text": "Transactional update",
+            "message_payload": None,
             "event_type": "DELIVERY_EN_ROUTE",
             "attempts": 0,
             "created_at": "2026-07-26T10:00:00Z",
@@ -61,6 +64,47 @@ class WhatsAppOutboundPolicyTests(unittest.TestCase):
         self.assertEqual(rpc.call_args.args[0], "record_whatsapp_coalesced")
         self.assertEqual(rpc.call_args.args[1]["p_cancelled_outbox_id"], 9)
 
+    def test_structured_payload_is_forwarded_to_adapter(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "type": "interactive_buttons",
+            "fallback_text": "1) Ver menú 2) Ver mi pedido 3) Hablar con alguien",
+            "interactive": {
+                "body": "¿Qué deseas hacer?",
+                "buttons": [
+                    {"id": "replau.view_menu", "title": "Ver menú"},
+                    {"id": "replau.view_order", "title": "Ver mi pedido"},
+                    {"id": "replau.human_help", "title": "Hablar con alguien"},
+                ],
+            },
+        }
+        row = dict(self.row, message_text=payload["fallback_text"], message_payload=payload)
+        with patch.object(worker, "WHATSAPP_DRY_RUN", False), patch.object(
+            worker, "OPENCLAW_SEND_URL", "http://adapter.invalid/send/whatsapp"
+        ), patch.object(worker.requests, "post") as post:
+            post.return_value.raise_for_status.return_value = None
+            post.return_value.json.return_value = {"ok": True}
+            worker.send_whatsapp(row)
+        sent = post.call_args.kwargs["json"]
+        self.assertEqual(sent["message_text"], payload["fallback_text"])
+        self.assertEqual(sent["message_payload"], payload)
+
+    def test_pre_migration_schema_falls_back_without_retrying_delivery(self) -> None:
+        missing = worker.requests.HTTPError("column missing")
+        missing.response = worker.requests.Response()
+        missing.response.status_code = 400
+        missing.response._content = b'{"message":"column whatsapp_outbox.message_payload does not exist"}'
+        old_schema_response = worker.requests.Response()
+        old_schema_response.status_code = 200
+        old_schema_response._content = b'[]'
+        with patch.object(worker, "_MESSAGE_PAYLOAD_COLUMN_AVAILABLE", None), patch.object(
+            worker, "postgrest_request", side_effect=[missing, old_schema_response]
+        ) as request:
+            self.assertEqual(worker.get_pending(), [])
+        self.assertEqual(request.call_count, 2)
+        self.assertIn("message_payload", request.call_args_list[0].args[1])
+        self.assertNotIn("message_payload", request.call_args_list[1].args[1])
+
     def test_migration_defaults_to_safe_pause_and_enforces_windows(self) -> None:
         for marker in (
             "state text NOT NULL DEFAULT 'PAUSED'",
@@ -88,6 +132,18 @@ class WhatsAppOutboundPolicyTests(unittest.TestCase):
     def test_bridge_records_inbound_policy_state(self) -> None:
         self.assertIn("def record_whatsapp_policy_inbound(", BRIDGE)
         self.assertIn("record_whatsapp_policy_inbound(identity, inbound.message_text)", BRIDGE)
+
+    def test_structured_message_sql_is_versioned_validated_and_rollback_tested(self) -> None:
+        for marker in (
+            "whatsapp_message_payload_is_valid",
+            "interactive_buttons",
+            "message_text must equal message_payload.fallback_text",
+            "VALIDATE CONSTRAINT whatsapp_outbox_message_payload_check",
+        ):
+            self.assertIn(marker, STRUCTURED_MIGRATION)
+        self.assertIn("BEGIN;", STRUCTURED_CONTRACT)
+        self.assertIn("ROLLBACK;", STRUCTURED_CONTRACT)
+        self.assertIn("Structured payload was not persisted", STRUCTURED_CONTRACT)
 
 
 if __name__ == "__main__":

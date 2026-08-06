@@ -19,3 +19,9 @@ Only direct WhatsApp conversations are handled. Groups, channels, parent
 conversations, and threaded bindings are declined. Media is restricted to
 JPG, PNG, WebP, or PDF files inside the canonical inbound directory and is
 limited to 8 MB by default (`maxMediaBytes`).
+
+Provider button/list replies are normalized into stable Replau action IDs and
+forwarded to the bridge. Bridge responses may contain a versioned
+`message_payload`; the plugin passes it to the send adapter together with the
+inbound provider message ID so a future Meta Cloud API transport can use native
+buttons plus read/typing behavior. Text fallback remains mandatory.

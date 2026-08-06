@@ -7,6 +7,7 @@ import {
   envValue,
   findMediaPath,
   isDirectWhatsAppConversation,
+  interactiveReplyFromMetadata,
   mimeType,
   validateMediaPath,
 } from "./router-core.ts";
@@ -23,6 +24,18 @@ test("normalizes WhatsApp senders", () => {
 test("creates stable, isolated channel ids for multiple WhatsApp accounts", () => {
   assert.equal(channelIdForAccount(undefined), "replau-main");
   assert.equal(channelIdForAccount("Business Account #2"), "whatsapp-account:business-account-2");
+});
+
+test("extracts button and list replies from provider metadata", () => {
+  assert.deepEqual(
+    interactiveReplyFromMetadata({ message: { interactive: { button_reply: { id: "replau.view_menu", title: "Ver menú" } } } }),
+    { id: "replau.view_menu", title: "Ver menú" },
+  );
+  assert.deepEqual(
+    interactiveReplyFromMetadata({ interactive: { list_reply: { id: "payment.yape", title: "Yape" } } }),
+    { id: "payment.yape", title: "Yape" },
+  );
+  assert.equal(interactiveReplyFromMetadata({ unrelated: { id: "not-a-reply", title: "Ignore" } }), undefined);
 });
 
 test("accepts direct WhatsApp chats and rejects groups or threads", () => {

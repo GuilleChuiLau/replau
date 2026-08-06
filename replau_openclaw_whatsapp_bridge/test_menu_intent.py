@@ -24,6 +24,12 @@ class MenuIntentTest(unittest.TestCase):
             with self.subTest(message=message):
                 self.assertTrue(self.bridge.is_menu_request(message))
 
+    def test_recognizes_quick_action_intents(self):
+        self.assertTrue(self.bridge.is_order_status_intent("PEDIDO"))
+        self.assertTrue(self.bridge.is_order_status_intent("¿Dónde está mi pedido?"))
+        self.assertTrue(self.bridge.is_human_help_intent("AYUDA"))
+        self.assertTrue(self.bridge.is_human_help_intent("Hablar con alguien"))
+
     def test_does_not_match_unrelated_text(self):
         self.assertFalse(self.bridge.is_menu_request("Quiero dos hamburguesas"))
 
@@ -184,6 +190,53 @@ class MenuIntentTest(unittest.TestCase):
         self.assertIsNone(inbound.message_text)
         self.assertEqual(inbound.latitude, -12.1199)
         self.assertEqual(inbound.longitude, -76.9917)
+
+    def test_normalized_interactive_reply_becomes_existing_menu_intent(self):
+        inbound = self.bridge.extract_payload(
+            {
+                "whatsapp_number": "51999999999",
+                "message_type": "interactive",
+                "interactive_reply_id": "replau.view_menu",
+                "interactive_reply_title": "Ver menú",
+            }
+        )
+        self.assertEqual(inbound.message_type, "text")
+        self.assertEqual(inbound.message_text, "menu")
+        self.assertEqual(inbound.interactive_reply_id, "replau.view_menu")
+
+    def test_cloud_api_button_reply_and_channel_identity_are_normalized(self):
+        inbound = self.bridge.extract_payload(
+            {
+                "channel_kind": "whatsapp",
+                "channel_id": "whatsapp-account:cloud-primary",
+                "account_id": "cloud-primary",
+                "entry": [{
+                    "changes": [{
+                        "value": {
+                            "messages": [{
+                                "from": "51999999999",
+                                "type": "interactive",
+                                "interactive": {
+                                    "type": "button_reply",
+                                    "button_reply": {"id": "replau.human_help", "title": "Hablar con alguien"},
+                                },
+                            }]
+                        }
+                    }]
+                }],
+            }
+        )
+        self.assertEqual(inbound.message_type, "text")
+        self.assertEqual(inbound.message_text, "hablar con alguien")
+        self.assertEqual(inbound.channel_id, "whatsapp-account:cloud-primary")
+        self.assertEqual(inbound.account_id, "cloud-primary")
+
+    def test_quick_actions_have_safe_text_fallback(self):
+        payload = self.bridge.quick_actions_payload(self.bridge.menu_offer_text())
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["type"], "interactive_buttons")
+        self.assertIn("MENU", payload["fallback_text"])
+        self.assertEqual(len(payload["interactive"]["buttons"]), 3)
 
     def test_signed_web_handoff_links_order_from_any_conversation_state(self):
         message = (

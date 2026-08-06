@@ -44,3 +44,8 @@ Messages outside the customer-service window remain blocked. If Replau later
 migrates to Meta's official WhatsApp Business Platform, approved template
 classification should be added as a separate policy input rather than
 weakening the session rule for linked-device delivery.
+
+The provider-neutral `message_payload` contract and disabled-by-default Meta
+transport now provide that delivery foundation. Activating the transport still
+requires approved templates and must not bypass this policy, recipient opt-outs,
+rate limits, coalescing, or the failure circuit.

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "templates": [
+    {
+      "name": "replau_order_confirmed_v1",
+      "language": "es_PE",
+      "category": "UTILITY",
+      "components": [
+        {
+          "type": "BODY",
+          "text": "Hola {{1}}, tu pedido {{2}} está confirmado. Total: S/ {{3}}. Seguimiento: {{4}}",
+          "example": {
+            "body_text": [["Memo", "PED-000123", "42.50", "https://orders.replau.com/track/example"]]
+          }
+        },
+        {"type": "FOOTER", "text": "Replau Burger"}
+      ]
+    },
+    {
+      "name": "replau_order_ready_v1",
+      "language": "es_PE",
+      "category": "UTILITY",
+      "components": [
+        {
+          "type": "BODY",
+          "text": "Tu pedido {{1}} ya está listo ✅ {{2}}",
+          "example": {"body_text": [["PED-000123", "Te esperamos para recogerlo."]]}
+        },
+        {"type": "FOOTER", "text": "Replau Burger"}
+      ]
+    },
+    {
+      "name": "replau_order_dispatched_v1",
+      "language": "es_PE",
+      "category": "UTILITY",
+      "components": [
+        {
+          "type": "BODY",
+          "text": "Tu pedido {{1}} va en camino 🛵 Sigue la entrega aquí: {{2}}",
+          "example": {
+            "body_text": [["PED-000123", "https://orders.replau.com/track/example"]]
+          }
+        },
+        {"type": "FOOTER", "text": "Replau Burger"}
+      ]
+    }
+  ]
+}

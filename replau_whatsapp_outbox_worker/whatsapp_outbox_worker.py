@@ -38,6 +38,8 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
 
+_MESSAGE_PAYLOAD_COLUMN_AVAILABLE: bool | None = None
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -62,6 +64,9 @@ def postgrest_request(method: str, path_or_url: str, **kwargs: Any) -> requests.
             return response
         except requests.RequestException as exc:
             last_exc = exc
+            status = exc.response.status_code if exc.response is not None else None
+            if status is not None and status < 500:
+                raise
             logging.warning(
                 "Transient PostGREST %s %s failed on attempt %s/%s: %s",
                 method.upper(), url, attempt + 1, max_attempts, exc
@@ -74,17 +79,30 @@ def postgrest_request(method: str, path_or_url: str, **kwargs: Any) -> requests.
 
 
 def get_pending() -> List[Dict[str, Any]]:
+    global _MESSAGE_PAYLOAD_COLUMN_AVAILABLE
     now = quote(utc_now_iso(), safe=":-TZ")
+    base_select = "id,pedido_id,whatsapp_number,message_text,event_type,attempts,created_at,not_before,policy_decision"
+    selected = base_select + ",message_payload" if _MESSAGE_PAYLOAD_COLUMN_AVAILABLE is not False else base_select
     url = (
         pg_url("/whatsapp_outbox")
         + "?status=eq.PENDING"
         + f"&attempts=lt.{MAX_ATTEMPTS}"
         + f"&or=(not_before.is.null,not_before.lte.{now})"
-        + "&select=id,pedido_id,whatsapp_number,message_text,event_type,attempts,created_at,not_before,policy_decision"
+        + f"&select={selected}"
         + "&order=created_at.asc"
         + f"&limit={BATCH_LIMIT}"
     )
-    response = postgrest_request("GET", url)
+    try:
+        response = postgrest_request("GET", url)
+        if _MESSAGE_PAYLOAD_COLUMN_AVAILABLE is None:
+            _MESSAGE_PAYLOAD_COLUMN_AVAILABLE = True
+    except requests.HTTPError as exc:
+        body = exc.response.text if exc.response is not None else ""
+        if _MESSAGE_PAYLOAD_COLUMN_AVAILABLE is False or "message_payload" not in body:
+            raise
+        _MESSAGE_PAYLOAD_COLUMN_AVAILABLE = False
+        logging.warning("whatsapp_outbox.message_payload is not installed; using text-only compatibility mode")
+        response = postgrest_request("GET", url.replace(selected, base_select))
     return response.json()
 
 
@@ -145,12 +163,14 @@ def coalesce_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def send_whatsapp(row: Dict[str, Any]) -> Dict[str, Any]:
+    message_payload = row.get("message_payload")
+    requested_type = str((message_payload or {}).get("type") or "text") if isinstance(message_payload, dict) else "text"
     if WHATSAPP_DRY_RUN:
         logging.info(
-            "DRY RUN WhatsApp outbox id=%s event=%s message_length=%s",
-            row["id"], row["event_type"], len(str(row.get("message_text") or "")),
+            "DRY RUN WhatsApp outbox id=%s event=%s message_type=%s message_length=%s",
+            row["id"], row["event_type"], requested_type, len(str(row.get("message_text") or "")),
         )
-        return {"ok": True, "dry_run": True}
+        return {"ok": True, "dry_run": True, "requested_message_type": requested_type}
 
     if not OPENCLAW_SEND_URL:
         raise RuntimeError("OPENCLAW_SEND_URL is not configured")
@@ -158,6 +178,7 @@ def send_whatsapp(row: Dict[str, Any]) -> Dict[str, Any]:
     payload = {
         "whatsapp_number": row["whatsapp_number"],
         "message_text": row["message_text"],
+        "message_payload": message_payload,
         "event_type": row["event_type"],
         "pedido_id": row["pedido_id"],
         "outbox_id": row["id"],

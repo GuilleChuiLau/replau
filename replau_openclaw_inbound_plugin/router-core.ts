@@ -4,6 +4,8 @@ import { extname, resolve } from "node:path";
 export const MEDIA_ROOT = "/home/guill/.openclaw/media/inbound/";
 export const DEFAULT_MAX_MEDIA_BYTES = 8 * 1024 * 1024;
 
+export type InteractiveReply = { id: string; title: string };
+
 const ALLOWED_MEDIA_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".pdf"]);
 
 export function envValue(text: string, key: string): string {
@@ -19,6 +21,31 @@ export function digits(value: unknown): string {
 export function channelIdForAccount(accountId: unknown, fallback = "replau-main"): string {
   const normalized = String(accountId ?? "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
   return normalized ? `whatsapp-account:${normalized.slice(0, 80)}` : fallback;
+}
+
+export function interactiveReplyFromMetadata(value: unknown): InteractiveReply | undefined {
+  const queue: unknown[] = [value];
+  let inspected = 0;
+  while (queue.length && inspected < 100) {
+    const current = queue.shift();
+    inspected += 1;
+    if (!current || typeof current !== "object") continue;
+    if (Array.isArray(current)) {
+      queue.push(...current.slice(0, 20));
+      continue;
+    }
+    const record = current as Record<string, unknown>;
+    for (const key of ["button_reply", "list_reply", "interactive_reply", "interactiveReply"]) {
+      const candidate = record[key];
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+      const reply = candidate as Record<string, unknown>;
+      const id = String(reply.id ?? "").trim();
+      const title = String(reply.title ?? reply.text ?? "").trim();
+      if (id || title) return { id: id.slice(0, 256), title: (title || id).slice(0, 160) };
+    }
+    queue.push(...Object.values(record).slice(0, 30));
+  }
+  return undefined;
 }
 
 export function isDirectWhatsAppConversation(params: {

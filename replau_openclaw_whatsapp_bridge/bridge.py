@@ -245,6 +245,8 @@ class NormalizedWebhook(BaseModel):
     channel_id: Optional[str] = None
     account_id: Optional[str] = None
     customer_address: Optional[str] = None
+    interactive_reply_id: Optional[str] = None
+    interactive_reply_title: Optional[str] = None
     raw_payload: Optional[Dict[str, Any]] = None
 
 
@@ -677,6 +679,8 @@ def extract_payload(data: Dict[str, Any]) -> NormalizedWebhook:
     media = extract_media_fields(data)
     latitude = data.get("latitude")
     longitude = data.get("longitude")
+    interactive_reply_id = first_non_empty(data.get("interactive_reply_id"), data.get("button_reply_id"), data.get("list_reply_id"))
+    interactive_reply_title = first_non_empty(data.get("interactive_reply_title"), data.get("button_reply_title"), data.get("list_reply_title"))
 
     contact = data.get("contact") or {}
     if not whatsapp_number:
@@ -691,6 +695,12 @@ def extract_payload(data: Dict[str, Any]) -> NormalizedWebhook:
             message_text = first_non_empty(msg.get("body"), nested_text)
         if not whatsapp_number:
             whatsapp_number = first_non_empty(msg.get("from"), msg.get("wa_id"), msg.get("phone"))
+        interactive = msg.get("interactive") or {}
+        if isinstance(interactive, dict):
+            interactive_reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
+            if isinstance(interactive_reply, dict):
+                interactive_reply_id = interactive_reply_id or first_non_empty(interactive_reply.get("id"))
+                interactive_reply_title = interactive_reply_title or first_non_empty(interactive_reply.get("title"))
         loc = msg.get("location") or {}
         if isinstance(loc, dict):
             latitude = latitude if latitude is not None else loc.get("latitude")
@@ -702,6 +712,12 @@ def extract_payload(data: Dict[str, Any]) -> NormalizedWebhook:
             whatsapp_number = first_non_empty(message0.get("from"))
         if not message_text and isinstance(message0.get("text"), dict):
             message_text = first_non_empty(message0["text"].get("body"))
+        interactive = message0.get("interactive") or {}
+        if isinstance(interactive, dict):
+            interactive_reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
+            if isinstance(interactive_reply, dict):
+                interactive_reply_id = interactive_reply_id or first_non_empty(interactive_reply.get("id"))
+                interactive_reply_title = interactive_reply_title or first_non_empty(interactive_reply.get("title"))
         if "location" in message0:
             message_type = "location"
             latitude = latitude if latitude is not None else message0["location"].get("latitude")
@@ -716,6 +732,15 @@ def extract_payload(data: Dict[str, Any]) -> NormalizedWebhook:
                 media["media_mime_type"] = media["media_mime_type"] or first_non_empty(media_obj.get("mime_type"))
     except Exception:
         pass
+
+    if interactive_reply_id or interactive_reply_title:
+        canonical_replies = {
+            "replau.view_menu": "menu",
+            "replau.view_order": "estado de mi pedido",
+            "replau.human_help": "hablar con alguien",
+        }
+        message_text = canonical_replies.get(str(interactive_reply_id or "").strip(), interactive_reply_title or interactive_reply_id)
+        message_type = "text"
 
     # A web-order handoff can contain a Google Maps URL as one field.  It is
     # still a structured text message; promoting the whole payload to a
@@ -748,6 +773,12 @@ def extract_payload(data: Dict[str, Any]) -> NormalizedWebhook:
         media_base64=media.get("media_base64"),
         media_filename=media.get("media_filename"),
         media_mime_type=media.get("media_mime_type"),
+        channel_kind=first_non_empty(data.get("channel_kind")),
+        channel_id=first_non_empty(data.get("channel_id")),
+        account_id=first_non_empty(data.get("account_id")),
+        customer_address=first_non_empty(data.get("customer_address"), whatsapp_number),
+        interactive_reply_id=interactive_reply_id,
+        interactive_reply_title=interactive_reply_title,
         raw_payload=data,
     )
 
@@ -1559,6 +1590,34 @@ def is_repeat_order_intent(text: Optional[str]) -> bool:
     }
 
 
+def is_order_status_intent(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    normalized = normalize_loose_text(text)
+    return normalized in {
+        "pedido",
+        "mi pedido",
+        "ver mi pedido",
+        "estado de mi pedido",
+        "estado del pedido",
+        "donde esta mi pedido",
+    }
+
+
+def is_human_help_intent(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    normalized = normalize_loose_text(text)
+    return normalized in {
+        "ayuda",
+        "hablar con alguien",
+        "hablar con una persona",
+        "hablar con un asesor",
+        "necesito ayuda",
+        "atencion humana",
+    }
+
+
 def is_yes(text: Optional[str]) -> bool:
     if not text:
         return False
@@ -1694,6 +1753,27 @@ def menu_offer_text() -> str:
         "Si ya sabes qué pedir, envíame tu nombre y los productos.\n"
         "Ejemplo:\nJuan Pérez\n1 hamburguesa doble con queso\n1 papas grandes\n1 coca cola mediana"
     )
+
+
+def quick_actions_payload(body: str) -> Dict[str, Any]:
+    fallback = (
+        f"{body}\n\n"
+        "Opciones rápidas: escribe MENU para ver el menú, PEDIDO para consultar tu pedido "
+        "o AYUDA para hablar con alguien."
+    )
+    return {
+        "schema_version": 1,
+        "type": "interactive_buttons",
+        "fallback_text": fallback,
+        "interactive": {
+            "body": body,
+            "buttons": [
+                {"id": "replau.view_menu", "title": "Ver menú"},
+                {"id": "replau.view_order", "title": "Ver mi pedido"},
+                {"id": "replau.human_help", "title": "Hablar con alguien"},
+            ],
+        },
+    }
 
 
 def looks_like_fresh_order(text: Optional[str]) -> bool:
@@ -2247,12 +2327,18 @@ def handle_new_or_asking(inbound: NormalizedWebhook, conversation: Optional[Dict
 
     if inbound.message_type != "text" or not inbound.message_text:
         text = menu_offer_text()
+        structured = quick_actions_payload(text)
         patch_conversation(
             inbound.whatsapp_number,
-            {"estado": "ASKING_NAME_AND_ITEMS", "pedido_borrador": {"awaiting_menu_offer": True}, "last_outbound_text": text},
+            {"estado": "ASKING_NAME_AND_ITEMS", "pedido_borrador": {"awaiting_menu_offer": True}, "last_outbound_text": structured["fallback_text"]},
         )
-        log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", text)
-        return reply(text, next_state="ASKING_NAME_AND_ITEMS", awaiting_menu_offer=True)
+        log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", structured["fallback_text"])
+        return reply(
+            structured["fallback_text"],
+            next_state="ASKING_NAME_AND_ITEMS",
+            awaiting_menu_offer=True,
+            message_payload=structured,
+        )
 
     try:
         if should_preserve_name_for_item_retry(draft):
@@ -2295,9 +2381,14 @@ def handle_new_or_asking(inbound: NormalizedWebhook, conversation: Optional[Dict
             "Si ya sabes qué pedir, envíalo así:\nJuan Pérez\n1 hamburguesa doble con queso\n1 papas grandes\n1 coca cola mediana\n\n"
             f"Detalle técnico: {exc}"
         )
-        patch_conversation(inbound.whatsapp_number, {"estado": "ASKING_NAME_AND_ITEMS", "pedido_borrador": {"awaiting_menu_offer": True}, "last_outbound_text": text})
-        log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", text)
-        return reply(text, next_state="ASKING_NAME_AND_ITEMS")
+        structured = quick_actions_payload(text)
+        patch_conversation(inbound.whatsapp_number, {"estado": "ASKING_NAME_AND_ITEMS", "pedido_borrador": {"awaiting_menu_offer": True}, "last_outbound_text": structured["fallback_text"]})
+        log_whatsapp_message(inbound.whatsapp_number, "OUTBOUND", "text", structured["fallback_text"])
+        return reply(
+            structured["fallback_text"],
+            next_state="ASKING_NAME_AND_ITEMS",
+            message_payload=structured,
+        )
 
 
 def handle_waiting_payment_and_location(inbound: NormalizedWebhook, conversation: Dict[str, Any]) -> Dict[str, Any]:
@@ -3341,6 +3432,21 @@ def _route_message_scoped(inbound: NormalizedWebhook) -> Dict[str, Any]:
             handoff_reason=handoff.get("reason") or "",
             handoff_updated_at=handoff.get("updated_at") or "",
         )
+
+    if inbound.message_type == "text" and is_human_help_intent(inbound.message_text):
+        text = (
+            "Entendido. Registré tu solicitud para que una persona del equipo pueda revisar este chat. "
+            "Cuéntame brevemente qué necesitas y lo verán en la bandeja de atención."
+        )
+        log_whatsapp_message(identity, "OUTBOUND", "text", text)
+        return reply(text, next_state=state, human_handoff_requested=True)
+
+    if inbound.message_type == "text" and is_order_status_intent(inbound.message_text):
+        text = confirmed_order_summary_text(conversation or {})
+        if not text:
+            text = "No encontré un pedido confirmado en este chat. Puedes escribir MENU para comenzar uno nuevo."
+        log_whatsapp_message(identity, "OUTBOUND", "text", text)
+        return reply(text, next_state=state, order_status_requested=True)
 
     # Storefront orders are already confirmed transactions. Recognize their
     # signed handoff independently of stale WhatsApp conversation state.

@@ -53,6 +53,7 @@ SOURCE_DIRS = [
     ROOT / "replau_payment_proof_flow_package",
     ROOT / "replau_product_admin_package",
     ROOT / "replau_whatsapp_outbox_worker",
+    ROOT / "replau_whatsapp_templates",
 ]
 
 TOP_LEVEL_PY = [
@@ -206,6 +207,22 @@ def check_logistics_payment_gates(gate: Gate) -> None:
     gate.run("Logistics payment gate contract", [sys.executable, str(test_file)], timeout=30)
 
 
+def check_whatsapp_transport_contracts(gate: Gate) -> None:
+    tests = [
+        ("WhatsApp bridge contract", ROOT / "replau_openclaw_whatsapp_bridge/test_menu_intent.py"),
+        ("WhatsApp outbox contract", ROOT / "replau_whatsapp_outbox_worker/test_whatsapp_outbound_policy.py"),
+        ("WhatsApp adapter contract", ROOT / "replau_openclaw_whatsapp_send_adapter/test_send_adapter.py"),
+        ("WhatsApp template manifest", ROOT / "replau_whatsapp_templates/test_templates.py"),
+    ]
+    for label, test_file in tests:
+        gate.run(label, [sys.executable, str(test_file)], timeout=45)
+    gate.run(
+        "WhatsApp inbound plugin contract",
+        ["npm", "test", "--prefix", str(ROOT / "replau_openclaw_inbound_plugin")],
+        timeout=45,
+    )
+
+
 def check_source_deploy_drift(gate: Gate) -> None:
     for deployment in SERVICE_DEPLOYMENTS:
         if not deployment.source.exists():
@@ -356,6 +373,7 @@ def main() -> int:
     check_payment_fulfillment_contract(gate)
     check_reliability_observability(gate)
     check_logistics_payment_gates(gate)
+    check_whatsapp_transport_contracts(gate)
     if not args.skip_deploy_drift:
         check_source_deploy_drift(gate)
     if args.require_clean_git:

@@ -7,6 +7,7 @@ import {
   digits,
   envValue,
   findMediaPath,
+  interactiveReplyFromMetadata,
   isDirectWhatsAppConversation,
   mimeType,
   validateMediaPath,
@@ -25,13 +26,19 @@ type InboundData = {
   metadata?: Record<string, unknown>;
 };
 
-async function routeToBridge(api: any, data: InboundData): Promise<string> {
+type BridgeResult = {
+  replyText: string;
+  messagePayload?: Record<string, unknown>;
+};
+
+async function routeToBridge(api: any, data: InboundData): Promise<BridgeResult> {
   const config = (api.pluginConfig ?? {}) as Record<string, unknown>;
   const bridgeUrl = String(config.bridgeUrl || DEFAULT_BRIDGE_URL);
   const envFile = String(config.envFile || DEFAULT_ENV_FILE);
   const timeoutMs = Number(config.timeoutMs || 15000);
   const maxMediaBytes = Number(config.maxMediaBytes || DEFAULT_MAX_MEDIA_BYTES);
   const defaultChannelId = String(config.channelId || "replau-main");
+  const interactiveReply = interactiveReplyFromMetadata(data.metadata);
   const mediaPath = await validateMediaPath(
     findMediaPath({ content: data.content, metadata: data.metadata }),
     maxMediaBytes,
@@ -46,8 +53,10 @@ async function routeToBridge(api: any, data: InboundData): Promise<string> {
     channel_kind: "whatsapp",
     channel_id: channelIdForAccount(data.accountId, defaultChannelId),
     account_id: data.accountId || null,
-    message_type: mediaPath ? (mediaPath.toLowerCase().endsWith(".pdf") ? "document" : "image") : "text",
-    message_text: data.content,
+    message_type: mediaPath ? (mediaPath.toLowerCase().endsWith(".pdf") ? "document" : "image") : (interactiveReply ? "interactive" : "text"),
+    message_text: data.content || interactiveReply?.title || interactiveReply?.id || "",
+    interactive_reply_id: interactiveReply?.id || null,
+    interactive_reply_title: interactiveReply?.title || null,
     raw_payload: { message_id: data.messageId, sender_name: data.senderName, metadata: data.metadata },
   };
   if (mediaPath) {
@@ -65,10 +74,22 @@ async function routeToBridge(api: any, data: InboundData): Promise<string> {
   const result = (await response.json()) as Record<string, unknown>;
   const replyText = String(result.reply_text || "").trim();
   if (!replyText) throw new Error("bridge returned no reply_text");
-  return replyText;
+  const messagePayload = result.message_payload;
+  return {
+    replyText,
+    messagePayload: messagePayload && typeof messagePayload === "object" && !Array.isArray(messagePayload)
+      ? messagePayload as Record<string, unknown>
+      : undefined,
+  };
 }
 
-async function sendViaAdapter(api: any, customer: string, messageText: string): Promise<void> {
+async function sendViaAdapter(
+  api: any,
+  customer: string,
+  messageText: string,
+  messagePayload?: Record<string, unknown>,
+  replyToMessageId?: string,
+): Promise<void> {
   const config = (api.pluginConfig ?? {}) as Record<string, unknown>;
   const adapterUrl = String(config.adapterUrl || DEFAULT_ADAPTER_URL);
   const adapterEnvFile = String(config.adapterEnvFile || DEFAULT_ADAPTER_ENV_FILE);
@@ -83,6 +104,8 @@ async function sendViaAdapter(api: any, customer: string, messageText: string): 
     body: JSON.stringify({
       whatsapp_number: customer,
       message_text: messageText,
+      message_payload: messagePayload || null,
+      reply_to_message_id: replyToMessageId || null,
       event_type: "REPLAU_INBOUND_REPLY",
     }),
     signal: AbortSignal.timeout(timeoutMs),
@@ -114,7 +137,7 @@ export default definePluginEntry({
 
       try {
         const content = String(event.body || event.content || "").trim();
-        const replyText = await routeToBridge(api, {
+        const result = await routeToBridge(api, {
           customer,
           content,
           accountId: event.accountId,
@@ -122,7 +145,7 @@ export default definePluginEntry({
           senderName: event.senderName,
           metadata: event.metadata,
         });
-        await sendViaAdapter(api, customer, replyText);
+        await sendViaAdapter(api, customer, result.replyText, result.messagePayload, event.messageId);
         return { handled: true };
       } catch (error) {
         api.logger.error(`Replau inbound router failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -144,12 +167,14 @@ export default definePluginEntry({
         return { handled: true, text: "No pude identificar este chat. Por favor intenta nuevamente." };
       }
       try {
-        const text = await routeToBridge(api, {
+        const result = await routeToBridge(api, {
           customer,
           content: String(event.body || event.content || "").trim(),
           accountId: ctx.accountId,
+          messageId: event.messageId,
+          metadata: event.metadata,
         });
-        await sendViaAdapter(api, customer, text);
+        await sendViaAdapter(api, customer, result.replyText, result.messagePayload, event.messageId);
         api.logger.info(`Replau routed WhatsApp inbound for session ${ctx.sessionKey || customer}`);
         return { handled: true };
       } catch (error) {
