@@ -56,11 +56,15 @@ the additive migration with the local PostgreSQL owner:
 
 ```bash
 sudo -u postgres psql -d localapi -v ON_ERROR_STOP=1 \
-  -f /home/guill/.openclaw/workspace/replau/postgrest_local/add_whatsapp_structured_messages.sql
+  < /home/guill/.openclaw/workspace/replau/postgrest_local/add_whatsapp_structured_messages.sql
 
 sudo -u postgres psql -d localapi -v ON_ERROR_STOP=1 \
-  -f /home/guill/.openclaw/workspace/replau/postgrest_local/test_whatsapp_structured_messages.sql
+  < /home/guill/.openclaw/workspace/replau/postgrest_local/test_whatsapp_structured_messages.sql
 ```
+
+The redirection is intentional: the logged-in operator reads the private
+workspace file before `sudo` starts `psql`; the `postgres` OS user cannot
+traverse the private OpenClaw workspace directory directly.
 
 The worker detects a pre-migration schema and stays in text-only compatibility
 mode, so a service restart before migration is safe.
